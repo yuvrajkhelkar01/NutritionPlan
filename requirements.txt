@@ -1,17 +1,17 @@
-streamlit>=1.40
-python-dotenv>=1.0
-Pillow>=10.0
+# Pinned to the versions tested locally (Python 3.12).
+streamlit==1.63.0
+python-dotenv==1.2.3
+Pillow==12.3.0
 
 # Google Drive
-google-api-python-client>=2.100
-google-auth>=2.23
-google-auth-oauthlib>=1.1
+google-api-python-client==2.200.0
+google-auth==2.58.0
+google-auth-oauthlib==1.4.1
+httplib2==0.32.0
 
-# AI provider (default: Claude)
-anthropic
-
-# Gemini (currently selected with AI_PROVIDER=gemini)
-google-genai
+# AI providers: Gemini is selected (AI_PROVIDER=gemini); Claude kept as an option
+google-genai==2.23.0
+anthropic==1.6.0
 
 # Optional: uncomment if you switch AI_PROVIDER to openai
 # openai
