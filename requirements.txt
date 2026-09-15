@@ -1,0 +1,17 @@
+streamlit>=1.40
+python-dotenv>=1.0
+Pillow>=10.0
+
+# Google Drive
+google-api-python-client>=2.100
+google-auth>=2.23
+google-auth-oauthlib>=1.1
+
+# AI provider (default: Claude)
+anthropic
+
+# Gemini (currently selected with AI_PROVIDER=gemini)
+google-genai
+
+# Optional: uncomment if you switch AI_PROVIDER to openai
+# openai

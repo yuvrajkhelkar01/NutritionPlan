@@ -1,0 +1,13 @@
+# Secrets
+.env
+credentials*.json
+token.json
+.streamlit/secrets.toml
+
+# Local editor / assistant settings
+.claude/settings.local.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
