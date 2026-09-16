@@ -8,12 +8,14 @@ from __future__ import annotations
 import copy
 import hashlib
 import hmac
+import html
 import io
 import time
 import zipfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
+from pathlib import Path
 
 import streamlit as st
 
@@ -33,6 +35,9 @@ GOOGLE_NATIVE_PREFIX = "application/vnd.google-apps."
 
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_SECONDS = 300
+
+STYLE_FILE = Path(__file__).with_name("style.css")
+WELCOME_BARS = [(44, ""), (78, "gold"), (36, ""), (70, "gold"), (58, ""), (100, "gold"), (50, ""), (84, "gold"), (62, "")]  # (height %, class)
 
 
 @dataclass(frozen=True)
@@ -217,7 +222,7 @@ def as_download(name: str, data: bytes, mime_type: str) -> tuple[str, bytes, str
 def pdf_download_button(md_name: str, text: str, **kwargs) -> None:
     """Download button for a Markdown document, delivered as PDF."""
     name, data, mime = as_download(md_name, text.encode("utf-8"), "text/markdown")
-    st.download_button(f"Download {name}", data, file_name=name, mime=mime, on_click="ignore", **kwargs)
+    st.download_button(f"Download {name}", data, file_name=name, mime=mime, on_click="ignore", icon=":material/download:", **kwargs)
 
 
 def mime_for(filename: str) -> str:
@@ -452,6 +457,34 @@ def photo_inputs() -> list[Attachment]:
     return photos
 
 
+def load_styles() -> None:
+    st.html(f"<style>{STYLE_FILE.read_text(encoding='utf-8')}</style>")
+
+
+def hero(title: str, subtitle: str = "", eyebrow: str = "") -> None:
+    """Large page heading with an optional pill label above and a muted line below."""
+    parts = [f'<span class="np-eyebrow">{html.escape(eyebrow)}</span>' if eyebrow else "",
+             f"<h1>{html.escape(title)}</h1>",
+             f"<p>{html.escape(subtitle)}</p>" if subtitle else ""]
+    st.html(f'<div class="np-hero">{"".join(parts)}</div>')
+
+
+def back_button(label: str) -> bool:
+    """Small arrow link at the top of a screen."""
+    with st.container(key="topbar"):
+        return st.button(label, icon=":material/arrow_back:", type="tertiary", key="back")
+
+
+def welcome_card(subtitle: str) -> None:
+    """Card with the app's tagline and decorative bars, shown before the doctor is signed in."""
+    bars = "".join(f'<span class="{cls}" style="height:{height}%"></span>' for height, cls in WELCOME_BARS)
+    st.html(
+        '<div class="np-welcome"><div><span class="np-eyebrow">NutritionPlan</span>'
+        f"<h1>Personal care plans for every patient</h1><p>{html.escape(subtitle)}</p></div>"
+        f'<div class="np-bars" aria-hidden="true">{bars}</div></div>'
+    )
+
+
 def show_flash() -> None:
     if st.session_state.flash:
         st.success(st.session_state.flash)
@@ -471,7 +504,7 @@ def password_gate() -> bool:
     """True once this browser session has entered APP_PASSWORD; otherwise renders the password screen."""
     if st.session_state.authenticated:
         return True
-    st.title("🥗 NutritionPlan")
+    welcome_card("Case notes, diet and exercise plans and medicines, kept in your own Google Drive.")
     if not config.APP_PASSWORD:
         st.error("APP_PASSWORD is not set. Add it to .env (or Streamlit secrets when deployed) and restart the app.")
         return False
@@ -484,7 +517,7 @@ def password_gate() -> bool:
 
     with st.form("password"):
         password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Unlock", type="primary")
+        submitted = st.form_submit_button("Unlock", type="primary", icon=":material/lock_open:")
     if not submitted:
         return False
     if hmac.compare_digest(password.encode("utf-8"), config.APP_PASSWORD.encode("utf-8")):
@@ -505,15 +538,15 @@ def password_gate() -> bool:
 
 def sidebar() -> None:
     with st.sidebar:
-        st.markdown("### 🥗 NutritionPlan")
+        st.markdown("### :material/eco: NutritionPlan")
         st.caption(f"AI: {ai.provider_label()}")
-        if st.button("🔒 Lock app"):
+        if st.button("Lock app", icon=":material/lock:"):
             st.session_state.authenticated = False
             st.rerun()
         if st.session_state.drive is not None:
             st.caption("Signed in to Google Drive")
             # With GOOGLE_TOKEN_JSON the login comes from secrets, so there is nothing to log out of.
-            if not config.GOOGLE_TOKEN_JSON and st.button("Log out"):
+            if not config.GOOGLE_TOKEN_JSON and st.button("Log out", icon=":material/logout:"):
                 drive.logout()
                 for key, value in DEFAULT_STATE.items():
                     st.session_state[key] = copy.deepcopy(value)
@@ -526,9 +559,8 @@ def screen_login() -> None:
     if not outcome.ok:
         return
     if creds is None:
-        st.title("NutritionPlan")
-        st.write("Sign in with your Google account to open patient case studies stored in your Google Drive.")
-        if not st.button("Login", type="primary"):
+        welcome_card("Sign in with your Google account to open the patient case studies stored in your Google Drive.")
+        if not st.button("Login with Google", type="primary", icon=":material/login:"):
             return
 
         def show_link(url: str) -> None:
@@ -553,10 +585,10 @@ def screen_login() -> None:
 
 
 def screen_search() -> None:
-    st.title("Search for patient")
+    hero("Find a patient", "Search by name. If nobody matches, you can start a new case study.", eyebrow="Patients")
     with st.form("search"):
-        query = st.text_input("Patient name", value=st.session_state.search_query)
-        submitted = st.form_submit_button("Search", type="primary")
+        query = st.text_input("Patient name", value=st.session_state.search_query, placeholder="e.g. Anita Sharma")
+        submitted = st.form_submit_button("Search", type="primary", icon=":material/search:")
 
     if submitted:
         query = query.strip()
@@ -578,43 +610,47 @@ def screen_search() -> None:
 
     matches = st.session_state.matches
     if matches:
-        st.subheader("Did you mean…")
-        choice = st.radio("Matching patients", matches, format_func=lambda p: p.name, index=None)
-        left, right = st.columns(2)
-        if left.button("Open selected patient", type="primary", disabled=choice is None):
-            open_patient(choice)
-        if right.button(f"Create new patient “{st.session_state.search_query}”"):
-            go("new", matches=[])
+        with st.container(border=True, key="card-matches"):
+            st.subheader("Did you mean…")
+            choice = st.radio("Matching patients", matches, format_func=lambda p: p.name, index=None)
+            with st.container(horizontal=True):
+                if st.button("Open selected patient", type="primary", disabled=choice is None, icon=":material/folder_open:"):
+                    open_patient(choice)
+                if st.button(f"Create new patient “{st.session_state.search_query}”", icon=":material/person_add:"):
+                    go("new", matches=[])
 
 
 def screen_patient() -> None:
     patient = st.session_state.patient
     if patient is None:
         go("search")
-    show_flash()
-    st.title(patient.name)
-
-    row1 = st.columns(2)
-    row2 = st.columns(2)
-    row3 = st.columns(2)
-    row4 = st.columns(2)
-    if row1[0].button("⬇️ Download Case files", width="stretch"):
-        st.session_state.view = "download"
-    if row1[1].button("📖 Open Patient Case Study", width="stretch"):
-        st.session_state.view = "open"
-    requested = None
-    if row2[0].button("🥗 Request Diet Plan", type="primary", width="stretch"):
-        requested = NUTRITION
-    if row2[1].button("🏃 Request Exercise Plan", type="primary", width="stretch"):
-        requested = EXERCISE
-    if row3[0].button("💊 Homeopathic Medicines", type="primary", width="stretch"):
-        reset_form()
-        go("medicine", view=None, medicine_list=None)
-    if row4[0].button("✏️ Update Case Study", width="stretch"):
-        reset_form()
-        go("update")
-    if row4[1].button("← Back to search", width="stretch"):
+    if back_button("Back to search"):
         go("search", patient=None, view=None, last_plan=None)
+    show_flash()
+    hero(patient.name, "Patient case study", eyebrow="Patient")
+
+    requested = None
+    with st.container(key="tiles"):
+        top, bottom = st.columns(2), st.columns(2)
+        if top[0].button("Diet Plan", icon=":material/restaurant:", key="tile-diet", width="stretch"):
+            requested = NUTRITION
+        if top[1].button("Exercise Plan", icon=":material/directions_run:", key="tile-exercise", width="stretch"):
+            requested = EXERCISE
+        if bottom[0].button("Medicines", icon=":material/medication:", key="tile-medicine", width="stretch"):
+            reset_form()
+            go("medicine", view=None, medicine_list=None)
+        if bottom[1].button("Update Case", icon=":material/edit_note:", key="tile-update", width="stretch"):
+            reset_form()
+            go("update")
+
+    with st.container(horizontal=True):
+        view = st.session_state.view
+        if st.button("Open Case Study", icon=":material/menu_book:", type="primary" if view == "open" else "secondary"):
+            st.session_state.view = "open"
+            st.rerun()
+        if st.button("Download Case files", icon=":material/download:", type="primary" if view == "download" else "secondary"):
+            st.session_state.view = "download"
+            st.rerun()
     st.divider()
 
     if requested:
@@ -668,11 +704,11 @@ def render_downloads() -> None:
         st.info("This patient has no files yet.")
         return
 
-    st.download_button("Download all as ZIP", cache["zip"], file_name=f"{name}.zip", mime="application/zip", type="primary", on_click="ignore")
+    st.download_button("Download all as ZIP", cache["zip"], file_name=f"{name}.zip", mime="application/zip", type="primary", on_click="ignore", icon=":material/folder_zip:")
     for path, f in files:
         if path in payload:
             download_path, file_name, data, mime = payload[path]
-            st.download_button(download_path, data, file_name=file_name, mime=mime, key=f"dl-{f.id}", on_click="ignore")
+            st.download_button(download_path, data, file_name=file_name, mime=mime, key=f"dl-{f.id}", on_click="ignore", icon=":material/description:")
         else:
             st.caption(f"{path} (Google Docs file, open it in Drive)")
 
@@ -682,11 +718,11 @@ def render_case_study() -> None:
         listing = case_listing()
 
         st.subheader("Case notes (Info.md)")
-        with st.container(border=True):
+        with st.container(border=True, key="card-info"):
             st.markdown(file_bytes(listing["info"]).decode("utf-8") if listing["info"] else "_Info.md has not been created yet._")
 
         st.subheader("Extra observations (Extra_info.md)")
-        with st.container(border=True):
+        with st.container(border=True, key="card-extra"):
             st.markdown(file_bytes(listing["extra"]).decode("utf-8") if listing["extra"] else "_No observations yet._")
 
         photos = listing["photos"]
@@ -702,10 +738,10 @@ def render_case_study() -> None:
             st.download_button(f"{other.name}", file_bytes(other), file_name=other.name, mime=other.mime_type, key=f"open-{other.id}", on_click="ignore")
 
         st.subheader("Nutrition plan")
-        render_saved_plan(NUTRITION, listing["nutrition"], "Request Diet Plan")
+        render_saved_plan(NUTRITION, listing["nutrition"], "Diet Plan")
 
         st.subheader("Exercise plan")
-        render_saved_plan(EXERCISE, listing["exercise"], "Request Exercise Plan")
+        render_saved_plan(EXERCISE, listing["exercise"], "Exercise Plan")
 
         st.subheader("Homeopathic medicines")
         render_medicine_lists(listing["medicine"])
@@ -718,14 +754,14 @@ def render_saved_plan(kind: PlanKind, plan_file: DriveFile | None, button: str) 
         st.info(f"Nothing saved yet. Use **{button}** to create one.")
         return
     text = file_bytes(plan_file).decode("utf-8")
-    with st.container(border=True):
+    with st.container(border=True, key=f"card-plan-{kind.key}"):
         st.markdown(text)
     pdf_download_button(kind.file, text, key=f"dl-{kind.key}")
 
 
 def render_medicine_lists(lists: list[tuple[int, DriveFile]]) -> None:
     if not lists:
-        st.info("Nothing saved yet. Use **Homeopathic Medicines** to create one.")
+        st.info("Nothing saved yet. Use **Medicines** to create one.")
         return
     by_number = dict(lists)
     numbers = sorted(by_number, reverse=True)
@@ -735,7 +771,7 @@ def render_medicine_lists(lists: list[tuple[int, DriveFile]]) -> None:
     )
     list_file = by_number[number]
     text = file_bytes(list_file).decode("utf-8")
-    with st.container(border=True):
+    with st.container(border=True, key="card-medicine"):
         st.markdown(text)
     pdf_download_button(list_file.name, text, key="dl-medicine")
 
@@ -747,9 +783,9 @@ def render_new_plan() -> None:
         st.success(f"{kind.file} saved to Drive.")
     else:
         st.info("Nothing was added to the case study since this plan was saved, so the saved plan is shown and the AI was not called.")
-        if st.button("🔄 Regenerate anyway", key=f"regenerate-{key}") and run_plan_request(kind, force=True):
+        if st.button("Regenerate anyway", key=f"regenerate-{key}", icon=":material/refresh:") and run_plan_request(kind, force=True):
             st.rerun()
-    with st.container(border=True):
+    with st.container(border=True, key="card-new-plan"):
         st.markdown(text)
     pdf_download_button(kind.file, text, type="primary")
 
@@ -757,18 +793,15 @@ def render_new_plan() -> None:
 def screen_new() -> None:
     name = st.session_state.search_query
     nonce = st.session_state.form_nonce
-    st.title("New case study")
-    st.markdown(f"No patient named ***{name}*** found. Create new case study?")
+    if back_button("Back to search"):
+        reset_form()
+        go("search", patient=None)
+    hero(name, "No patient with this name yet. Add their notes to create a case study.", eyebrow="New case study")
 
     photos = photo_inputs()
     notes = st.text_area("Extra observations (text from doctor)", key=f"notes-{nonce}", height=160)
 
-    left, right = st.columns(2)
-    create = left.button("Create patient", type="primary", width="stretch")
-    if right.button("← Back to search", width="stretch"):
-        reset_form()
-        go("search", patient=None)
-    if create:
+    if st.button("Create patient", type="primary", icon=":material/person_add:"):
         if not photos and not notes.strip():
             st.warning("Add at least one photo or some observations.")
             return
@@ -795,8 +828,10 @@ def screen_update() -> None:
     if patient is None:
         go("search")
     nonce = st.session_state.form_nonce
-    st.title("Update case study")
-    st.markdown(f"Patient: **{patient.name}**")
+    if back_button("Back to patient"):
+        reset_form()
+        go("patient", view=None)
+    hero(patient.name, "Add new photos or observations.", eyebrow="Update case study")
 
     photos = photo_inputs()
     replace = st.toggle(
@@ -809,12 +844,7 @@ def screen_update() -> None:
         confirmed = st.checkbox("Yes, replace all existing photos", key=f"confirm-{nonce}")
     notes = st.text_area("Extra observations (text from doctor)", key=f"notes-{nonce}", height=160)
 
-    left, right = st.columns(2)
-    save = left.button("Save", type="primary", width="stretch")
-    if right.button("Cancel", width="stretch"):
-        reset_form()
-        go("patient", view=None)
-    if not save:
+    if not st.button("Save", type="primary", icon=":material/save:"):
         return
     if replace and not photos:
         st.warning("Upload the new photos that should replace the existing ones.")
@@ -831,7 +861,7 @@ def screen_update() -> None:
         status.update(label="Case study saved", state="complete", expanded=False)
     if outcome.ok:
         reset_form()
-        go("patient", view=None, last_plan=None, flash="Case study updated. Use Request Diet Plan or Request Exercise Plan to generate new plans.")
+        go("patient", view=None, last_plan=None, flash="Case study updated. Use Diet Plan or Exercise Plan to generate new plans.")
 
 
 def screen_medicine() -> None:
@@ -839,11 +869,10 @@ def screen_medicine() -> None:
     if patient is None:
         go("search")
     nonce = st.session_state.form_nonce
-    st.title("Homeopathic medicines")
-    st.markdown(f"Patient: **{patient.name}**")
-    if st.button("← Back to patient"):
+    if back_button("Back to patient"):
         reset_form()
         go("patient", view=None, medicine_list=None)
+    hero(patient.name, "Homeopathic medicine recommendations", eyebrow="Medicines")
 
     st.subheader("1. Get recommendations")
     st.caption("Based on Info.md and Extra_info.md. If nothing was added since the last list and you leave the box "
@@ -852,7 +881,7 @@ def screen_medicine() -> None:
         "Additional input for this request (optional)", key=f"medicine-extra-{nonce}", height=120,
         placeholder="For example: current symptoms, modalities, or remedies already tried.",
     )
-    if st.button("Generate recommendations", type="primary"):
+    if st.button("Generate recommendations", type="primary", icon=":material/auto_awesome:"):
         run_medicine_request(extra, force=False)
 
     current = st.session_state.medicine_list
@@ -864,9 +893,9 @@ def screen_medicine() -> None:
     else:
         st.info(f"Nothing was added to the case study since {medicine_file(number)} was saved, "
                 "so it is shown and the AI was not called.")
-        if st.button("🔄 Generate new recommendations anyway") and run_medicine_request(extra, force=True):
+        if st.button("Generate new recommendations anyway", icon=":material/refresh:") and run_medicine_request(extra, force=True):
             st.rerun()
-    with st.container(border=True):
+    with st.container(border=True, key="card-medicine-list"):
         st.markdown(text)
     pdf_download_button(medicine_file(number), text)
 
@@ -877,7 +906,7 @@ def screen_medicine() -> None:
         "Doctor's recommendations", key=f"medicine-doctor-{nonce}-{number}", height=160,
         placeholder="For example: use Kali bichromicum 30C instead of Pulsatilla; add Belladonna 200C for acute fever.",
     )
-    if st.button("Create revised list", type="primary"):
+    if st.button("Create revised list", type="primary", icon=":material/edit_note:"):
         if not doctor_input.strip():
             st.warning("Enter your recommendations first.")
             return
@@ -905,11 +934,11 @@ CHAT_CSS = """
 <style>
 .st-key-chat-launcher, .st-key-chat-panel { position: fixed; right: 24px; z-index: 999990; }
 .st-key-chat-launcher { bottom: 24px; width: auto !important; }
-.st-key-chat-launcher button { border-radius: 999px; padding: 0.6rem 1.2rem; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25); }
+.st-key-chat-launcher button { border-radius: 999px; padding: 0.75rem 1.4rem; box-shadow: 0 10px 28px rgba(35, 34, 32, 0.3); }
 .st-key-chat-panel {
   bottom: 0; width: min(460px, calc(100vw - 32px)) !important; padding: 0.75rem 1rem 1rem;
   background: %(background)s; border: 1px solid %(border)s; border-bottom: none;
-  border-radius: 14px 14px 0 0; box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.25);
+  border-radius: 28px 28px 0 0; box-shadow: 0 -12px 36px rgba(35, 34, 32, 0.22);
   %(animation)s
 }
 .st-key-chat-messages { height: min(440px, 55vh) !important; }
@@ -923,15 +952,15 @@ def records_chat() -> None:
     """Floating "Ask about patients" button that slides up a chat over every patient's records."""
     dark = st.context.theme.type == "dark"
     st.html(CHAT_CSS % {
-        "background": "#0e1117" if dark else "#ffffff",
-        "border": "rgba(250, 250, 250, 0.2)" if dark else "rgba(49, 51, 63, 0.2)",
+        "background": "#0e1117" if dark else "#F4EEE8",
+        "border": "rgba(250, 250, 250, 0.2)" if dark else "#D6C7B5",
         "animation": "animation: chat-slide-up 0.28s ease-out;" if st.session_state.chat_animate else "",
     })
     st.session_state.chat_animate = False
 
     if not st.session_state.chat_open:
         with st.container(key="chat-launcher"):
-            if st.button("💬 Ask about patients", type="primary"):
+            if st.button("Ask about patients", type="primary", icon=":material/forum:"):
                 st.session_state.chat_open = True
                 st.session_state.chat_animate = True
                 st.rerun()
@@ -939,12 +968,12 @@ def records_chat() -> None:
 
     with st.container(key="chat-panel"):
         with st.container(horizontal=True, vertical_alignment="center"):
-            st.markdown("**💬 Patient records assistant**", width="stretch")
+            st.markdown("**:material/forum: Patient records assistant**", width="stretch")
             if st.button("New chat", key="chat-clear", disabled=not st.session_state.chat_turns):
                 st.session_state.chat_turns = []
                 st.session_state.chat_patients = []
                 st.rerun()
-            if st.button("✕", key="chat-close", help="Close"):
+            if st.button("", icon=":material/close:", key="chat-close", help="Close"):
                 st.session_state.chat_open = False
                 st.rerun()
 
@@ -1008,6 +1037,7 @@ SCREENS = {
 
 def main() -> None:
     init_state()
+    load_styles()
     if not password_gate():
         return
     sidebar()

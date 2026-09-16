@@ -1,0 +1,150 @@
+/* NutritionPlan look: cream background, beige cards, charcoal tiles, gold accents.
+   Colors match .streamlit/config.toml. Loaded on every run by app.load_styles(). */
+
+:root {
+  --np-cream: #F4EEE8;
+  --np-beige: #E6DCCF;
+  --np-beige-deep: #DCCFBF;
+  --np-field: #FBF8F4;
+  --np-charcoal: #232220;
+  --np-charcoal-hover: #0F0E0D;
+  --np-gold: #C8964C;
+  --np-gold-soft: #E2BF86;
+  --np-text: #1D1B18;
+  --np-muted: #6E6254;
+  --np-line: #D6C7B5;
+}
+
+/* ---------- page */
+
+header[data-testid="stHeader"] { background: transparent; }
+[data-testid="stMainBlockContainer"] { padding-top: 3.5rem; padding-bottom: 6rem; }
+h1, h2, h3 { letter-spacing: -0.02em; }
+[data-testid="stMain"] h3 { font-size: 1.35rem; }
+hr { border-color: var(--np-line) !important; }
+
+/* ---------- hero heading ("Bedrooms / Usage today") */
+
+.np-hero { margin: 0.25rem 0 0.5rem; }
+.np-eyebrow {
+  display: inline-block; margin-bottom: 0.9rem; padding: 0.3rem 0.85rem;
+  border-radius: 999px; background: var(--np-charcoal); color: var(--np-cream);
+  font-size: 0.75rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+}
+.np-hero h1 {
+  margin: 0; padding: 0; font-size: clamp(2rem, 6vw, 2.75rem); font-weight: 700; line-height: 1.12;
+  color: var(--np-text); overflow-wrap: anywhere;
+}
+.np-hero p { margin: 0.35rem 0 0; color: var(--np-muted); font-size: 1rem; font-weight: 500; }
+
+/* ---------- welcome card on the password and login screens */
+
+.np-welcome {
+  display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 1.5rem;
+  margin-bottom: 0.5rem; padding: 2.25rem 2rem 2rem; border-radius: 2.25rem; background: var(--np-beige);
+}
+.np-welcome h1 {
+  max-width: 15ch; margin: 0; padding: 0; font-size: clamp(2rem, 6vw, 2.6rem); font-weight: 700; line-height: 1.15;
+  color: var(--np-text);
+}
+.np-welcome p { max-width: 30ch; margin: 1rem 0 0; color: var(--np-muted); font-weight: 500; }
+.np-bars { display: flex; align-items: flex-end; gap: 0.55rem; height: 9rem; }
+.np-bars span { width: 0.9rem; border-radius: 999px; background: var(--np-charcoal); }
+.np-bars span.gold { background: var(--np-gold); }
+
+/* ---------- cards: forms and bordered containers */
+
+[data-testid="stForm"] {
+  padding: 1.5rem; border: none; border-radius: 1.75rem; background: var(--np-beige);
+}
+[class*="st-key-card-"] {
+  padding: 1.5rem; border: none; border-radius: 1.75rem; background: var(--np-beige);
+}
+
+/* documents shown inside cards: keep their own headings smaller than the page heading */
+[class*="st-key-card-"] h1 { font-size: 1.6rem; }
+[class*="st-key-card-"] h2 { font-size: 1.25rem; }
+[class*="st-key-card-"] h3 { font-size: 1.1rem; }
+
+/* inputs sit lighter than the beige cards */
+[data-testid="stTextInputRootElement"], [data-testid="stTextAreaRootElement"], [data-baseweb="textarea"],
+[data-baseweb="select"] > div, [data-testid="stFileUploaderDropzone"] {
+  background: var(--np-field) !important;
+}
+[data-testid="stTextAreaRootElement"] textarea { background: transparent !important; }
+[data-testid="stFileUploaderDropzone"] { border-radius: 1.25rem; }
+
+/* ---------- buttons: charcoal primary pills, outlined secondary pills */
+
+button[data-testid="stBaseButton-primary"],
+button[data-testid="stBaseButton-primaryFormSubmit"],
+[data-testid="stDownloadButton"] button[kind="primary"],
+[data-testid="stLinkButton"] a[kind="primary"] {
+  border: none; background: var(--np-charcoal); color: var(--np-cream);
+  font-weight: 500; padding-inline: 1.4rem;
+}
+button[data-testid="stBaseButton-primary"]:hover,
+button[data-testid="stBaseButton-primaryFormSubmit"]:hover,
+[data-testid="stDownloadButton"] button[kind="primary"]:hover,
+[data-testid="stLinkButton"] a[kind="primary"]:hover {
+  background: var(--np-charcoal-hover); color: var(--np-gold-soft);
+}
+button[data-testid="stBaseButton-primary"]:disabled { background: var(--np-beige-deep); color: var(--np-muted); }
+
+button[data-testid="stBaseButton-secondary"],
+button[data-testid="stBaseButton-secondaryFormSubmit"],
+[data-testid="stDownloadButton"] button[kind="secondary"] {
+  border-color: var(--np-line); background: transparent; color: var(--np-text); font-weight: 500;
+}
+button[data-testid="stBaseButton-secondary"]:hover,
+[data-testid="stDownloadButton"] button[kind="secondary"]:hover {
+  border-color: var(--np-gold); background: var(--np-field); color: var(--np-text);
+}
+[data-testid="stIconMaterial"] { color: inherit; }
+
+/* ---------- action tiles on the patient screen ("Light / Sound / Fans / Heater") */
+
+.st-key-tiles [data-testid="stHorizontalBlock"] { gap: 1rem; }
+.st-key-tiles button {
+  width: 100%; min-height: 9.5rem; padding: 1.25rem; border: none; border-radius: 2rem;
+  background: var(--np-charcoal); color: #FFFFFF;
+  box-shadow: 0 10px 24px rgba(35, 34, 32, 0.18);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+.st-key-tiles button > div > span { flex-direction: column; gap: 0.8rem; }
+.st-key-tiles button > div > span > span:first-child { margin: 0; }
+.st-key-tiles button [data-testid="stIconMaterial"] { color: var(--np-gold); font-size: 2.4rem; }
+.st-key-tiles button p { font-size: 1.05rem; font-weight: 500; }
+.st-key-tiles button:hover { transform: translateY(-2px); background: var(--np-charcoal-hover); color: #FFFFFF; }
+.st-key-tiles button:active { transform: translateY(0); }
+
+/* top bar: back link on the left, label pill on the right */
+.st-key-topbar button[data-testid="stBaseButton-tertiary"] { color: var(--np-text); font-weight: 500; }
+.st-key-topbar button[data-testid="stBaseButton-tertiary"]:hover { color: var(--np-gold); }
+
+/* ---------- sidebar */
+
+[data-testid="stSidebar"] h3 { font-weight: 700; }
+
+/* ---------- messages, expanders, status */
+
+[data-testid="stAlertContainer"] { border-radius: 1.25rem; }
+[data-testid="stExpander"] details { border-color: var(--np-line); border-radius: 1.25rem; background: var(--np-field); }
+[data-testid="stImage"] img { border-radius: 1.25rem; }
+
+/* ---------- Markdown tables in plans and medicine lists */
+
+[data-testid="stMarkdownContainer"] table { border-collapse: separate; border-spacing: 0; overflow: hidden; border-radius: 1rem; }
+[data-testid="stMarkdownContainer"] th { background: var(--np-charcoal); color: var(--np-cream); font-weight: 500; }
+[data-testid="stMarkdownContainer"] td { background: var(--np-field); }
+
+@media (max-width: 640px) {
+  [data-testid="stMainBlockContainer"] { padding-top: 3rem; }
+  .np-welcome { grid-template-columns: 1fr; padding: 1.75rem 1.4rem; border-radius: 1.75rem; }
+  .np-bars { height: 5.5rem; }
+  /* keep the tiles two across on phones (Streamlit stacks columns below 640px) */
+  .st-key-tiles [data-testid="stHorizontalBlock"] { flex-wrap: nowrap; gap: 0.75rem; }
+  .st-key-tiles [data-testid="stColumn"] { min-width: 0 !important; }
+  .st-key-tiles button { min-height: 8rem; border-radius: 1.6rem; padding: 1rem 0.5rem; }
+  .st-key-tiles button p { font-size: 0.95rem; }
+}

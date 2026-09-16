@@ -1,0 +1,19 @@
+# Warm cream / charcoal / gold theme. Layout details (tiles, cards, hero headers) are in style.css.
+
+[theme]
+base = "light"
+primaryColor = "#C8964C"
+backgroundColor = "#F4EEE8"
+secondaryBackgroundColor = "#E6DCCF"
+textColor = "#1D1B18"
+linkColor = "#8F6526"
+borderColor = "#D6C7B5"
+showWidgetBorder = true
+baseRadius = "1rem"
+buttonRadius = "full"
+font = "Poppins:https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap"
+headingFontWeights = [700, 700, 600, 600, 600, 600]
+
+[theme.sidebar]
+backgroundColor = "#E6DCCF"
+secondaryBackgroundColor = "#F4EEE8"
