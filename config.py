@@ -51,6 +51,9 @@ GOOGLE_TOKEN_FILE = BASE_DIR / _get("GOOGLE_TOKEN_FILE", "token.json")
 # When set it replaces the token file and the Login screen.
 GOOGLE_TOKEN_JSON = _get("GOOGLE_TOKEN_JSON")
 
+# --- Time zone for visit clock-ins (the server itself may run in UTC) ---
+APP_TIMEZONE = _get("APP_TIMEZONE", "Asia/Kolkata")
+
 PROMPTS_DIR = BASE_DIR / "prompts"
 
 

@@ -122,6 +122,10 @@ button[data-testid="stBaseButton-secondary"]:hover,
 .st-key-topbar button[data-testid="stBaseButton-tertiary"] { color: var(--np-text); font-weight: 500; }
 .st-key-topbar button[data-testid="stBaseButton-tertiary"]:hover { color: var(--np-gold); }
 
+/* Clock in Visit button beside the patient name */
+.st-key-clockin { align-items: flex-end; }
+@media (max-width: 640px) { .st-key-clockin { align-items: flex-start; } }
+
 /* ---------- sidebar */
 
 [data-testid="stSidebar"] h3 { font-weight: 700; }

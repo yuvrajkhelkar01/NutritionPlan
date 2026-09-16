@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 
@@ -67,12 +68,15 @@ DEFAULT_STATE = {
     "patient": None,  # DriveFile of the selected patient folder
     "search_query": "",
     "matches": [],  # pick-list after an ambiguous search
-    "view": None,  # panel on the patient screen: download | open | plan
+    "view": None,  # panel on the patient screen: download | open | history | plan
     "last_plan": None,  # (plan kind key, markdown, generated) of the plan just requested; generated=False if reused
     "cache": {},  # patient id -> data already fetched from Drive this session
     "flash": None,  # one-off success message
     "form_nonce": 0,  # bumped to clear upload/text widgets
     "camera_shots": [],  # [(sha1, Attachment)] captured with the camera
+    "visit_manual": False,  # clock-in dialog is showing the manual date/time fields
+    "visit_pending": None,  # (datetime, earlier visit times that day) waiting for "add another visit" confirmation
+    "patient_counts": None,  # [drive.PatientVisits] listed on the Manage my Patients screen
     "medicine_list": None,  # (number, markdown, generated) of the medicine list shown on the medicine screen
     "chat_open": False,  # records chat panel on the search screen
     "chat_animate": False,  # play the slide-up animation on this run only (the panel was just opened)
@@ -372,10 +376,16 @@ def revise_medicines(doctor_input: str, current: tuple[int, str], log) -> tuple[
         invalidate_patient_cache()
 
 
-def create_patient(name: str, photos: list[Attachment], notes: str, log) -> PatientFolders:
+def create_patient(name: str, photos: list[Attachment], notes: str, log) -> tuple[PatientFolders, str]:
+    """Create the patient and return their folders and new patient code."""
     exact, _ = client().search_patients(st.session_state.root_id, name)
     if exact:
         raise DriveError(f"A patient named '{exact[0].name}' already exists. Go back and search for them.")
+
+    # Before the folders, so a failure here leaves nothing half-created and the doctor can simply retry.
+    log(f"Adding the patient to {drive.APPOINTMENT_SHEET}…")
+    code = client().register_patient_code(st.session_state.root_id, name)
+    log(f"Patient code: {code}")
 
     log("Creating patient folders…")
     f = client().create_patient(st.session_state.root_id, name)
@@ -393,7 +403,7 @@ def create_patient(name: str, photos: list[Attachment], notes: str, log) -> Pati
     extra = f"# Extra Information: {name}\n\n" + (extra_info_entry(notes) if notes.strip() else "")
     client().write_text(f.documents, drive.EXTRA_INFO_FILE, extra)
     records_index().mark_stale()
-    return f
+    return f, code
 
 
 def update_case_study(photos: list[Attachment], replace: bool, notes: str, log) -> None:
@@ -589,6 +599,8 @@ def screen_search() -> None:
     with st.form("search"):
         query = st.text_input("Patient name", value=st.session_state.search_query, placeholder="e.g. Anita Sharma")
         submitted = st.form_submit_button("Search", type="primary", icon=":material/search:")
+    if st.button("Manage my Patients", icon=":material/groups:"):
+        go("manage", patient_counts=None, matches=[])
 
     if submitted:
         query = query.strip()
@@ -620,6 +632,34 @@ def screen_search() -> None:
                     go("new", matches=[])
 
 
+def screen_manage() -> None:
+    if back_button("Back to search"):
+        go("search", patient_counts=None)
+    hero("Manage my patients", f"Overview of your patients from {drive.APPOINTMENT_SHEET}.", eyebrow="Patients")
+    if st.button("List all my patients", icon=":material/format_list_numbered:", type="primary"):
+        with guarded("listing your patients") as outcome, st.spinner(f"Reading {drive.APPOINTMENT_SHEET}…"):
+            counts = client().visit_counts(st.session_state.root_id)
+        if outcome.ok:
+            st.session_state.patient_counts = counts
+
+    counts = st.session_state.patient_counts
+    if counts is None:
+        return
+    st.divider()
+    if not counts:
+        st.info("No visits have been clocked in yet.")
+        return
+    total = sum(g.visits for g in counts)
+    st.caption(f"{len(counts)} patient{'s' if len(counts) != 1 else ''}, {total} visit{'s' if total != 1 else ''} in total. Most visits first.")
+    st.dataframe(
+        [{"Patient": g.name, "Visits": g.visits,
+          "Latest visit": f"{g.last_day:%d %b %Y}, {g.last_time}".rstrip(", ") if g.last_day else ""}
+         for g in counts],
+        hide_index=True,
+        width="stretch",
+    )
+
+
 def screen_patient() -> None:
     patient = st.session_state.patient
     if patient is None:
@@ -627,7 +667,14 @@ def screen_patient() -> None:
     if back_button("Back to search"):
         go("search", patient=None, view=None, last_plan=None)
     show_flash()
-    hero(patient.name, "Patient case study", eyebrow="Patient")
+    heading, action = st.columns([3, 2], vertical_alignment="center")
+    with heading:
+        hero(patient.name, "Patient case study", eyebrow="Patient")
+    with action, st.container(key="clockin"):
+        if st.button("Clock in Visit", icon=":material/schedule:", type="primary"):
+            st.session_state.visit_manual = False
+            st.session_state.visit_pending = None
+            clock_in_dialog()
 
     requested = None
     with st.container(key="tiles"):
@@ -651,6 +698,10 @@ def screen_patient() -> None:
         if st.button("Download Case files", icon=":material/download:", type="primary" if view == "download" else "secondary"):
             st.session_state.view = "download"
             st.rerun()
+        if st.button("Appointment History", icon=":material/event_note:", type="primary" if view == "history" else "secondary"):
+            st.session_state.view = "history"
+            patient_cache().pop("visits", None)  # re-read, in case the sheet was edited by hand
+            st.rerun()
     st.divider()
 
     if requested:
@@ -662,8 +713,82 @@ def screen_patient() -> None:
         render_downloads()
     elif view == "open":
         render_case_study()
+    elif view == "history":
+        render_appointment_history()
     elif view == "plan" and st.session_state.last_plan:
         render_new_plan()
+
+
+def local_now() -> datetime:
+    """Current time in the doctor's time zone, without tzinfo."""
+    return datetime.now(ZoneInfo(config.APP_TIMEZONE)).replace(tzinfo=None, second=0, microsecond=0)
+
+
+def save_visit(when: datetime) -> None:
+    name = st.session_state.patient.name
+    with guarded("clocking in the visit") as outcome, st.spinner(f"Adding to {drive.APPOINTMENT_SHEET}…"):
+        code = client().record_visit(st.session_state.root_id, name, when)
+    if outcome.ok:
+        patient_cache().pop("visits", None)
+        st.session_state.visit_pending = None
+        st.session_state.flash = f"Visit clocked in for {name} ({code}) on {when:%d %b %Y} at {when:%H:%M}."
+        st.rerun()  # closes the dialog
+
+
+def check_and_save_visit(when: datetime) -> None:
+    """Save the visit, or ask for confirmation first when the patient already has a visit that day."""
+    with guarded("checking earlier visits") as outcome, st.spinner("Checking earlier visits…"):
+        earlier = client().visit_times(st.session_state.root_id, st.session_state.patient.name, when.date())
+    if not outcome.ok:
+        return
+    if earlier:
+        st.session_state.visit_pending = (when, earlier)
+        st.rerun(scope="fragment")  # redraw the dialog with the confirmation
+    save_visit(when)
+
+
+def confirm_repeat_visit() -> None:
+    when, earlier = st.session_state.visit_pending
+    name = st.session_state.patient.name
+    day = "today" if when.date() == local_now().date() else f"on {when:%d %b %Y}"
+    times = ", ".join(t or "no time" for t in earlier)
+    st.warning(
+        f"**{name}** is already clocked in {day} ({len(earlier)} visit{'s' if len(earlier) > 1 else ''} at {times}). "
+        f"Add another visit at **{when:%H:%M}**?",
+        icon=":material/warning:",
+    )
+    with st.container(horizontal=True):
+        if st.button("Yes, add another visit", icon=":material/check:", type="primary"):
+            save_visit(when)
+        if st.button("Cancel", icon=":material/close:"):
+            st.session_state.visit_pending = None
+            st.rerun(scope="fragment")
+
+
+@st.dialog("Clock in visit")
+def clock_in_dialog() -> None:
+    st.write(f"Record a visit for **{st.session_state.patient.name}**.")
+    if st.session_state.visit_pending:
+        confirm_repeat_visit()
+        return
+    with st.container(horizontal=True):
+        if st.button("Add current time", icon=":material/bolt:", type="primary"):
+            check_and_save_visit(local_now())
+        if st.button("Add manually", icon=":material/edit_calendar:",
+                     type="primary" if st.session_state.visit_manual else "secondary"):
+            st.session_state.visit_manual = True
+    if st.session_state.visit_manual:
+        now = local_now()
+        day = st.date_input("Date", value=now.date(), max_value=now.date(), format="DD/MM/YYYY")
+        at = st.time_input("Time", value=now.time(), step=60)
+        if st.button("Save visit", icon=":material/check:", type="primary"):
+            when = datetime.combine(day, at)
+            # st.time_input has no upper limit, so a later time today is caught here. Checked against the
+            # clock at click time, not when the fields were drawn.
+            if when > local_now():
+                st.error(f"A visit can't be in the future. Pick a time up to {local_now():%d %b %Y, %H:%M}.")
+            else:
+                check_and_save_visit(when)
 
 
 def run_plan_request(kind: PlanKind, force: bool) -> bool:
@@ -678,39 +803,74 @@ def run_plan_request(kind: PlanKind, force: bool) -> bool:
     return outcome.ok
 
 
+def download_documents(listing: dict) -> list[tuple[DriveFile, str, str]]:
+    """(Drive file, PDF file name, title) of the documents offered in Download Case files, when they exist."""
+    latest_medicine = listing["medicine"][-1][1] if listing["medicine"] else None
+    documents = [
+        (listing["info"], "CaseStudy.pdf", "Case Study"),
+        (listing["nutrition"], "NutritionPlan.pdf", NUTRITION.title),
+        (listing["exercise"], "ExercisePlan.pdf", EXERCISE.title),
+        (latest_medicine, "MedicineList.pdf", MEDICINE_TITLE),
+    ]
+    return [(f, file_name, title) for f, file_name, title in documents if f is not None]
+
+
+def render_appointment_history() -> None:
+    """Rows for this patient's code from the visits tab of Appoinment_history, newest first."""
+    st.subheader("Appointment history")
+    with guarded("loading the appointment history") as outcome, st.spinner(f"Reading {drive.APPOINTMENT_SHEET}…"):
+        cache = patient_cache()
+        if "visits" not in cache:
+            cache["visits"] = client().patient_visits(st.session_state.root_id, st.session_state.patient.name)
+        code, visits = cache["visits"]
+    if not outcome.ok:
+        return
+    if code is None:
+        st.info("This patient has no patient code yet. Clock in a visit to give them one.")
+        return
+    if not visits:
+        st.info(f"No visits recorded for {code} yet.")
+        return
+    st.caption(f"{len(visits)} visit{'s' if len(visits) != 1 else ''} for patient code {code}, newest first.")
+    st.dataframe(
+        [{"Date": v.day.strftime("%d %b %Y") if v.day else "", "Time": v.time}
+         for v in visits],
+        hide_index=True,
+        width="stretch",
+    )
+
+
 def render_downloads() -> None:
+    """Case photos plus the case study, nutrition plan, exercise plan and latest medicine list as PDFs."""
     st.subheader("Case files")
     name = st.session_state.patient.name
     with guarded("loading case files") as outcome, st.spinner("Loading files from Drive…"):
+        listing = case_listing()
+        # (download path, file name, bytes, mime type, icon)
+        payload = [
+            (file_name, file_name, markdown_pdf(file_bytes(f).decode("utf-8"), f"{name}: {title}"), "application/pdf", ":material/description:")
+            for f, file_name, title in download_documents(listing)
+        ]
+        payload += [
+            (f"Photos/{photo.name}", photo.name, file_bytes(photo), photo.mime_type, ":material/image:")
+            for photo in listing["photos"] if not photo.mime_type.startswith(GOOGLE_NATIVE_PREFIX)
+        ]
         cache = patient_cache()
-        if "tree" not in cache:
-            cache["tree"] = client().walk(st.session_state.patient.id)
-        files = cache["tree"]
-        # Drive path -> (download path, file name, bytes, mime type); Markdown files are offered as PDF
-        payload = {}
-        for path, f in files:
-            if not f.mime_type.startswith(GOOGLE_NATIVE_PREFIX):
-                file_name, data, mime = as_download(f.name, file_bytes(f), f.mime_type)
-                payload[path] = (path.removesuffix(f.name) + file_name, file_name, data, mime)
         if "zip" not in cache:
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                for download_path, _, data, _ in payload.values():
+                for download_path, _, data, _, _ in payload:
                     zf.writestr(f"{name}/{download_path}", data)
             cache["zip"] = buf.getvalue()
     if not outcome.ok:
         return
-    if not files:
+    if not payload:
         st.info("This patient has no files yet.")
         return
 
     st.download_button("Download all as ZIP", cache["zip"], file_name=f"{name}.zip", mime="application/zip", type="primary", on_click="ignore", icon=":material/folder_zip:")
-    for path, f in files:
-        if path in payload:
-            download_path, file_name, data, mime = payload[path]
-            st.download_button(download_path, data, file_name=file_name, mime=mime, key=f"dl-{f.id}", on_click="ignore", icon=":material/description:")
-        else:
-            st.caption(f"{path} (Google Docs file, open it in Drive)")
+    for i, (download_path, file_name, data, mime, icon) in enumerate(payload):
+        st.download_button(download_path, data, file_name=file_name, mime=mime, key=f"dl-case-{i}", on_click="ignore", icon=icon)
 
 
 def render_case_study() -> None:
@@ -807,13 +967,13 @@ def screen_new() -> None:
             return
 
         with guarded("creating the patient") as outcome, st.status(f"Creating case study for {name}…", expanded=True) as status:
-            create_patient(name, photos, notes, st.write)
+            _, code = create_patient(name, photos, notes, st.write)
             status.update(label="Case study created", state="complete", expanded=False)
 
         if outcome.ok:
             reset_form()
             go("patient", view=None, last_plan=None,
-               flash=f"Created case study for {name}. Request a diet plan, exercise plan or medicines when you need them.")
+               flash=f"Created case study for {name} (patient code {code}). Request a diet plan, exercise plan or medicines when you need them.")
 
     if st.session_state.patient is not None:
         # The folder exists even though a later step failed; let the doctor continue from the patient page.
@@ -1032,6 +1192,7 @@ SCREENS = {
     "new": screen_new,
     "update": screen_update,
     "medicine": screen_medicine,
+    "manage": screen_manage,
 }
 
 

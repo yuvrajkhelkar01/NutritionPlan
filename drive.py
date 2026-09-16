@@ -18,6 +18,7 @@ import threading
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from typing import Callable
 
 import httplib2
@@ -50,6 +51,12 @@ EXERCISE_PLAN_FILE = "ExercisePlan.md"
 LEGACY_PLAN_PREFIX = "Plan"
 LEGACY_EXERCISE_PLAN_PREFIX = "ExercisePlan"
 MEDICINE_LIST_PREFIX = "MedicineList"  # Homeopathic_Medicine/MedicineListN.md
+SPREADSHEET_MIME = "application/vnd.google-apps.spreadsheet"
+APPOINTMENT_SHEET = "Appoinment_history"  # Google Sheet in NutritionPlan/ (name spelled as in Drive)
+VISIT_TAB_INDEX = 0  # first tab: PatientCode | PatientName | Date | Time
+PATIENT_TAB_INDEX = 1  # second tab: PatientCode | PatientName
+CODE_LETTERS = 3
+CODE_DIGITS = 2
 
 RESUMABLE_THRESHOLD = 5 * 1024 * 1024
 LOGIN_TIMEOUT_SECONDS = 180
@@ -194,6 +201,24 @@ class PatientFolders:
     medicine: str
 
 
+@dataclass(frozen=True)
+class Visit:
+    """One row of the visits tab in Appoinment_history."""
+    code: str
+    name: str
+    day: date | None  # None when the cell isn't a date
+    time: str  # HH:MM
+
+
+@dataclass(frozen=True)
+class PatientVisits:
+    """A patient's visit count and latest visit, from the visits tab."""
+    name: str
+    visits: int
+    last_day: date | None
+    last_time: str  # HH:MM
+
+
 def _quote(value: str) -> str:
     """Escape a value for use inside a single-quoted Drive query string."""
     return value.replace("\\", "\\\\").replace("'", "\\'")
@@ -203,6 +228,49 @@ def _from_api(item: dict) -> DriveFile:
     return DriveFile(item["id"], item["name"], item["mimeType"], item.get("modifiedTime", ""))
 
 
+def _tab_ref(title: str) -> str:
+    """A sheet tab name quoted for A1 notation."""
+    return "'" + title.replace("'", "''") + "'"
+
+
+SHEETS_EPOCH = date(1899, 12, 30)  # day 0 of Google Sheets date serial numbers
+TEXT_DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y")
+
+
+def _cell_date(value) -> date | None:
+    """A visit-sheet date cell: a serial number, or text typed by hand in a common format."""
+    if isinstance(value, (int, float)):
+        return SHEETS_EPOCH + timedelta(days=int(value))
+    for fmt in TEXT_DATE_FORMATS:
+        try:
+            return datetime.strptime(str(value).strip(), fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
+def _cell_time(value) -> str:
+    """A visit-sheet time cell as HH:MM (serial numbers are fractions of a day)."""
+    if isinstance(value, (int, float)):
+        minutes = round((value % 1) * 24 * 60) % (24 * 60)
+        return f"{minutes // 60:02d}:{minutes % 60:02d}"
+    return str(value).strip()
+
+
+def next_patient_code(name: str, existing: list[str]) -> str:
+    """First 3 letters of the name in capitals plus the lowest unused 2-digit number, e.g. 'Yuvraj' -> YUV01.
+
+    Names with fewer than 3 letters are padded with X. Codes already in `existing` are never reused.
+    """
+    letters = "".join(c for c in name.upper() if "A" <= c <= "Z")[:CODE_LETTERS].ljust(CODE_LETTERS, "X")
+    code_re = re.compile(rf"^{letters}(\d{{{CODE_DIGITS}}})$")
+    used = {int(m.group(1)) for code in existing if (m := code_re.match(code.strip().upper()))}
+    number = next((n for n in range(1, 10 ** CODE_DIGITS) if n not in used), None)
+    if number is None:
+        raise DriveError(f"All patient codes starting with {letters} are used ({letters}01–{letters}99).")
+    return f"{letters}{number:0{CODE_DIGITS}d}"
+
+
 # ---------------------------------------------------------------- client
 
 
@@ -210,6 +278,7 @@ class Drive:
     def __init__(self, creds: Credentials):
         self._creds = creds
         self._svc = build("drive", "v3", credentials=creds, cache_discovery=False)
+        self._sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
         # httplib2 connections are not thread-safe, and Streamlit can run a new rerun of the script while an
         # older one is still inside a Drive call. Concurrent use of one connection can crash the process.
         self._lock = threading.Lock()
@@ -345,6 +414,120 @@ class Drive:
         exercise_plans = self.get_or_create_folder(patient.id, EXERCISE_PLANS)
         medicine = self.get_or_create_folder(patient.id, MEDICINE)
         return PatientFolders(patient, documents, photos, plans, exercise_plans, medicine)
+
+    # --- appointment sheet
+
+    def _appointment_tabs(self, root_id: str) -> tuple[str, list[str]]:
+        """(spreadsheet id, tab titles in order) of Appoinment_history."""
+        sheet = self.find_child(root_id, APPOINTMENT_SHEET, folder=False)
+        if sheet is None or sheet.mime_type != SPREADSHEET_MIME:
+            raise DriveError(f"The Google Sheet '{APPOINTMENT_SHEET}' was not found in {ROOT_FOLDER}/.")
+        props = self._execute(
+            self._sheets.spreadsheets().get(spreadsheetId=sheet.id, fields="sheets.properties(title,index)"),
+            f"reading '{APPOINTMENT_SHEET}'",
+        )
+        tabs = sorted(props.get("sheets", []), key=lambda s: s["properties"].get("index", 0))
+        titles = [s["properties"]["title"] for s in tabs]
+        if len(titles) <= max(VISIT_TAB_INDEX, PATIENT_TAB_INDEX):
+            raise DriveError(f"'{APPOINTMENT_SHEET}' needs two sheets: visits first, patient codes second.")
+        return sheet.id, titles
+
+    def _read_rows(self, sheet_id: str, tab: str, cells: str, *, raw: bool = False) -> list[list]:
+        """Cell values as shown in the sheet; raw=True gives dates and times as serial numbers instead."""
+        options = {"valueRenderOption": "UNFORMATTED_VALUE", "dateTimeRenderOption": "SERIAL_NUMBER"} if raw else {}
+        resp = self._execute(
+            self._sheets.spreadsheets().values().get(spreadsheetId=sheet_id, range=f"{_tab_ref(tab)}!{cells}", **options),
+            f"reading '{APPOINTMENT_SHEET}'",
+        )
+        return resp.get("values", [])
+
+    def _append_row(self, sheet_id: str, tab: str, row: list[str], *, parse: bool) -> None:
+        """Append below the last row. parse=True lets Sheets read dates and times as real values."""
+        self._execute(
+            self._sheets.spreadsheets().values().append(
+                spreadsheetId=sheet_id,
+                range=f"{_tab_ref(tab)}!A:{chr(ord('A') + len(row) - 1)}",
+                valueInputOption="USER_ENTERED" if parse else "RAW",
+                insertDataOption="INSERT_ROWS",
+                body={"values": [row]},
+            ),
+            f"adding a row to '{APPOINTMENT_SHEET}'",
+        )
+
+    def register_patient_code(self, root_id: str, name: str) -> str:
+        """Give a new patient a code and append (code, name) to the second tab of Appoinment_history."""
+        sheet_id, tabs = self._appointment_tabs(root_id)
+        return self._register_code(sheet_id, tabs[PATIENT_TAB_INDEX], name)
+
+    def _register_code(self, sheet_id: str, tab: str, name: str) -> str:
+        code = next_patient_code(name, [row[0] for row in self._read_rows(sheet_id, tab, "A2:A") if row])
+        self._append_row(sheet_id, tab, [code, name], parse=False)
+        return code
+
+    def _find_code(self, sheet_id: str, tab: str, name: str) -> str | None:
+        """The patient's code from the second tab, matched by name (case-insensitive)."""
+        needle = name.strip().casefold()
+        return next(
+            (row[0].strip() for row in self._read_rows(sheet_id, tab, "A2:B")
+             if len(row) >= 2 and row[0].strip() and row[1].strip().casefold() == needle),
+            None,
+        )
+
+    def patient_visits(self, root_id: str, name: str) -> tuple[str | None, list[Visit]]:
+        """(patient code, visits with that code in the first tab, newest first). No code means no visits."""
+        sheet_id, tabs = self._appointment_tabs(root_id)
+        code = self._find_code(sheet_id, tabs[PATIENT_TAB_INDEX], name)
+        if code is None:
+            return None, []
+        visits = [
+            Visit(str(row[0]).strip(), str(row[1]).strip() if len(row) > 1 else "",
+                  _cell_date(row[2]) if len(row) > 2 else None, _cell_time(row[3]) if len(row) > 3 else "")
+            for row in self._read_rows(sheet_id, tabs[VISIT_TAB_INDEX], "A2:D", raw=True)
+            if row and str(row[0]).strip().upper() == code.upper()
+        ]
+        visits.sort(key=lambda v: (v.day or date.min, v.time), reverse=True)
+        return code, visits
+
+    def visit_counts(self, root_id: str) -> list[PatientVisits]:
+        """Visits in the first tab grouped by patient name ignoring case; most visits first."""
+        sheet_id, tabs = self._appointment_tabs(root_id)
+        groups: dict[str, PatientVisits] = {}  # casefolded name -> summary (name as first written)
+        for row in self._read_rows(sheet_id, tabs[VISIT_TAB_INDEX], "A2:D", raw=True):
+            name = str(row[1]).strip() if len(row) > 1 else ""
+            if not name:
+                continue
+            day = _cell_date(row[2]) if len(row) > 2 else None
+            time = _cell_time(row[3]) if len(row) > 3 else ""
+            current = groups.get(name.casefold()) or PatientVisits(name, 0, None, "")
+            later = day is not None and (current.last_day is None or (day, time) > (current.last_day, current.last_time))
+            groups[name.casefold()] = PatientVisits(
+                current.name, current.visits + 1,
+                day if later else current.last_day, time if later else current.last_time,
+            )
+        return sorted(groups.values(), key=lambda g: (-g.visits, g.name.casefold()))
+
+    def visit_times(self, root_id: str, name: str, day: date) -> list[str]:
+        """Times (HH:MM) of the visits already recorded for this patient on this day, in sheet order."""
+        sheet_id, tabs = self._appointment_tabs(root_id)
+        needle = name.strip().casefold()
+        return [
+            _cell_time(row[3]) if len(row) > 3 else ""
+            for row in self._read_rows(sheet_id, tabs[VISIT_TAB_INDEX], "A2:D", raw=True)
+            if len(row) > 2 and str(row[1]).strip().casefold() == needle and _cell_date(row[2]) == day
+        ]
+
+    def record_visit(self, root_id: str, name: str, when: datetime) -> str:
+        """Append (code, name, date, time) to the first tab; returns the patient code.
+
+        Patients created before codes existed get one here, so every visit row has a code.
+        """
+        sheet_id, tabs = self._appointment_tabs(root_id)
+        code = self._find_code(sheet_id, tabs[PATIENT_TAB_INDEX], name) or self._register_code(sheet_id, tabs[PATIENT_TAB_INDEX], name)
+        self._append_row(
+            sheet_id, tabs[VISIT_TAB_INDEX],
+            [code, name, when.strftime("%Y-%m-%d"), when.strftime("%H:%M")], parse=True,
+        )
+        return code
 
     # --- files
 
