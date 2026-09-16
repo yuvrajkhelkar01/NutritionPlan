@@ -1,5 +1,5 @@
 """AI calls: transcribe handwritten case notes (Info.md), generate nutrition and exercise plans,
-and recommend homeopathic medicines.
+recommend homeopathic medicines, and answer the doctor's chat questions about stored records.
 
 The provider is picked with AI_PROVIDER in .env: claude (default), gemini or openai.
 Prompts live in prompts/ so they can be edited without touching code.
@@ -21,6 +21,10 @@ SUPPORTED_MIMES = {"image/jpeg", "image/png", PDF_MIME}
 
 MAX_IMAGE_EDGE = 2400  # px; keeps handwriting legible while staying well under provider size limits
 MAX_OUTPUT_TOKENS = 32000
+
+# Chat: earlier turns resent with each question (answers shortened) so follow-ups make sense.
+CHAT_HISTORY_TURNS = 6
+CHAT_HISTORY_ANSWER_CHARS = 1500
 
 # Claude models that accept server-side refusal fallbacks (`fallbacks: "default"`).
 CLAUDE_FALLBACK_MODELS = {"claude-opus-5", "claude-fable-5-1"}
@@ -123,6 +127,23 @@ def recommend_medicines(
         parts.append("Write the recommendations as the table only.")
 
     return _complete(system, parts)
+
+
+def answer_question(question: str, records_md: str, history: list[tuple[str, str]]) -> str:
+    """Chat answer in Markdown.
+
+    `records_md` holds only the records that chat.py's search picked for this question; the AI never searches
+    Drive itself. `history` is the earlier (question, answer) pairs of this conversation, oldest first.
+    """
+    parts: list[str | Attachment] = [f"Today's date: {date.today():%Y-%m-%d}", f"# Records found by search\n\n{records_md}"]
+    if history:
+        turns = "\n\n".join(
+            f"**Doctor:** {q}\n\n**Assistant:** {a if len(a) <= CHAT_HISTORY_ANSWER_CHARS else a[:CHAT_HISTORY_ANSWER_CHARS] + ' …'}"
+            for q, a in history[-CHAT_HISTORY_TURNS:]
+        )
+        parts.append(f"# Conversation so far\n\n{turns}")
+    parts.append(f"# Doctor's question\n\n{question.strip()}")
+    return _complete(_prompt("chat_system.md"), parts)
 
 
 # ---------------------------------------------------------------- helpers

@@ -16,6 +16,7 @@ import json
 import re
 import threading
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable
 
@@ -52,6 +53,8 @@ MEDICINE_LIST_PREFIX = "MedicineList"  # Homeopathic_Medicine/MedicineListN.md
 
 RESUMABLE_THRESHOLD = 5 * 1024 * 1024
 LOGIN_TIMEOUT_SECONDS = 180
+PARENT_BATCH = 40  # folder ids per "'id' in parents or …" query in walk_tree()
+DOWNLOAD_WORKERS = 8  # parallel downloads in download_many()
 
 
 class DriveError(Exception):
@@ -205,13 +208,17 @@ def _from_api(item: dict) -> DriveFile:
 
 class Drive:
     def __init__(self, creds: Credentials):
+        self._creds = creds
         self._svc = build("drive", "v3", credentials=creds, cache_discovery=False)
         # httplib2 connections are not thread-safe, and Streamlit can run a new rerun of the script while an
         # older one is still inside a Drive call. Concurrent use of one connection can crash the process.
         self._lock = threading.Lock()
 
-    def _execute(self, request, action: str):
+    def _execute(self, request, action: str, *, locked: bool = True):
+        """Run a request; `locked=False` only for requests built on a connection owned by the calling thread."""
         try:
+            if not locked:
+                return request.execute(num_retries=2)
             with self._lock:
                 return request.execute(num_retries=2)
         except HttpError as e:
@@ -230,24 +237,53 @@ class Drive:
             query += f" and mimeType = '{FOLDER_MIME}'"
         elif folders is False:
             query += f" and mimeType != '{FOLDER_MIME}'"
-        items: list[DriveFile] = []
+        return [_from_api(f) for f in self._list_all(query, "id, name, mimeType, modifiedTime", order_by="name")]
+
+    def _list_all(self, query: str, file_fields: str, order_by: str | None = None) -> list[dict]:
+        """Raw file resources matching a query, following every result page."""
+        items: list[dict] = []
         page_token = None
         while True:
             resp = self._execute(
                 self._svc.files().list(
                     q=query,
                     spaces="drive",
-                    fields="nextPageToken, files(id, name, mimeType, modifiedTime)",
-                    orderBy="name",
+                    fields=f"nextPageToken, files({file_fields})",
+                    orderBy=order_by,
                     pageSize=1000,
                     pageToken=page_token,
                 ),
                 "listing files",
             )
-            items.extend(_from_api(f) for f in resp.get("files", []))
+            items.extend(resp.get("files", []))
             page_token = resp.get("nextPageToken")
             if not page_token:
                 return items
+
+    def walk_tree(self, folder_id: str) -> list[tuple[str, DriveFile]]:
+        """All files under a folder as (relative path, file) pairs, sorted by path.
+
+        Same result as walk(), but lists one folder level at a time with batched queries, so the whole
+        NutritionPlan/ tree takes a handful of requests instead of one per folder.
+        """
+        out: list[tuple[str, DriveFile]] = []
+        level = {folder_id: ""}  # folder id -> path prefix
+        while level:
+            next_level: dict[str, str] = {}
+            ids = list(level)
+            for i in range(0, len(ids), PARENT_BATCH):
+                parents = " or ".join(f"'{_quote(x)}' in parents" for x in ids[i:i + PARENT_BATCH])
+                for item in self._list_all(f"({parents}) and trashed = false", "id, name, mimeType, modifiedTime, parents"):
+                    parent = next((p for p in item.get("parents", []) if p in level), None)
+                    if parent is None:
+                        continue
+                    f = _from_api(item)
+                    if f.is_folder:
+                        next_level[f.id] = level[parent] + f.name + "/"
+                    else:
+                        out.append((level[parent] + f.name, f))
+            level = next_level
+        return sorted(out, key=lambda x: x[0])
 
     def find_child(self, parent_id: str, name: str, *, folder: bool) -> DriveFile | None:
         """Child with exactly this name (case-sensitive), or None."""
@@ -319,6 +355,19 @@ class Drive:
 
     def download_bytes(self, file_id: str, name: str = "file") -> bytes:
         return self._execute(self._svc.files().get_media(fileId=file_id), f"downloading '{name}'")
+
+    def download_many(self, files: list[DriveFile]) -> dict[str, bytes]:
+        """Contents by file id, downloaded in parallel. Each worker thread gets its own connection."""
+        local = threading.local()
+
+        def fetch(file: DriveFile) -> tuple[str, bytes]:
+            if not hasattr(local, "svc"):
+                local.svc = build("drive", "v3", credentials=self._creds, cache_discovery=False)
+            request = local.svc.files().get_media(fileId=file.id)
+            return file.id, self._execute(request, f"downloading '{file.name}'", locked=False)
+
+        with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as pool:
+            return dict(pool.map(fetch, files))
 
     def read_text(self, parent_id: str, name: str) -> str | None:
         found = self.find_child(parent_id, name, folder=False)

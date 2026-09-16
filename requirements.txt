@@ -3,6 +3,10 @@ streamlit==1.63.0
 python-dotenv==1.2.3
 Pillow==12.3.0
 
+# PDF downloads (Markdown → PDF)
+fpdf2==2.8.8
+markdown==3.10.3
+
 # Google Drive
 google-api-python-client==2.200.0
 google-auth==2.58.0

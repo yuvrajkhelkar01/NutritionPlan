@@ -1,7 +1,7 @@
 """NutritionPlan: Streamlit UI.
 
-Screens: Login → Search → Patient options | New case study → Update case study.
-Patient data lives only in Google Drive (drive.py); AI calls are in ai.py.
+Screens: Login → Search (with the records chat) → Patient options | New case study → Update case study.
+Patient data lives only in Google Drive (drive.py); AI calls are in ai.py; the chat's record search is in chat.py.
 """
 from __future__ import annotations
 
@@ -18,8 +18,10 @@ from datetime import date, datetime
 import streamlit as st
 
 import ai
+import chat
 import config
 import drive
+import pdf
 from ai import AIError, Attachment
 from drive import DriveError, DriveFile, PatientFolders
 
@@ -67,6 +69,10 @@ DEFAULT_STATE = {
     "form_nonce": 0,  # bumped to clear upload/text widgets
     "camera_shots": [],  # [(sha1, Attachment)] captured with the camera
     "medicine_list": None,  # (number, markdown, generated) of the medicine list shown on the medicine screen
+    "chat_open": False,  # records chat panel on the search screen
+    "chat_animate": False,  # play the slide-up animation on this run only (the panel was just opened)
+    "chat_turns": [],  # [{"question", "answer", "sources", "chars"}]
+    "chat_patients": [],  # patients the last question was about; a follow-up that names nobody stays on them
 }
 
 
@@ -124,6 +130,21 @@ def patient_cache() -> dict:
 def invalidate_patient_cache() -> None:
     if st.session_state.patient:
         st.session_state.cache.pop(st.session_state.patient.id, None)
+    records_index().mark_stale()
+
+
+@st.cache_resource
+def _records_index() -> chat.Index:
+    return chat.Index()
+
+
+def records_index() -> chat.Index:
+    """Search index for the records chat, kept for the life of the app process."""
+    index = _records_index()
+    if not isinstance(index, chat.Index):  # chat.py was edited while the app was running
+        _records_index.clear()
+        index = _records_index()
+    return index
 
 
 def folders() -> PatientFolders:
@@ -174,6 +195,29 @@ def case_changed_since(f: PatientFolders, output: DriveFile) -> bool:
 
 def download_attachment(file: DriveFile) -> Attachment:
     return Attachment(file.name, file.mime_type, client().download_bytes(file.id, file.name))
+
+
+def pdf_name(md_name: str) -> str:
+    return md_name.removesuffix(".md") + ".pdf"
+
+
+@st.cache_data(max_entries=200, show_spinner=False)
+def markdown_pdf(text: str, title: str) -> bytes:
+    return pdf.markdown_to_pdf(text, title)
+
+
+def as_download(name: str, data: bytes, mime_type: str) -> tuple[str, bytes, str]:
+    """(file name, bytes, mime type) offered for download: Markdown files are converted to PDF."""
+    if not name.endswith(".md"):
+        return name, data, mime_type
+    title = f"{st.session_state.patient.name}: {name.removesuffix('.md')}"
+    return pdf_name(name), markdown_pdf(data.decode("utf-8"), title), "application/pdf"
+
+
+def pdf_download_button(md_name: str, text: str, **kwargs) -> None:
+    """Download button for a Markdown document, delivered as PDF."""
+    name, data, mime = as_download(md_name, text.encode("utf-8"), "text/markdown")
+    st.download_button(f"Download {name}", data, file_name=name, mime=mime, on_click="ignore", **kwargs)
 
 
 def mime_for(filename: str) -> str:
@@ -343,6 +387,7 @@ def create_patient(name: str, photos: list[Attachment], notes: str, log) -> Pati
     log("Writing Extra_info.md…")
     extra = f"# Extra Information: {name}\n\n" + (extra_info_entry(notes) if notes.strip() else "")
     client().write_text(f.documents, drive.EXTRA_INFO_FILE, extra)
+    records_index().mark_stale()
     return f
 
 
@@ -605,12 +650,17 @@ def render_downloads() -> None:
         if "tree" not in cache:
             cache["tree"] = client().walk(st.session_state.patient.id)
         files = cache["tree"]
-        payload = {path: file_bytes(f) for path, f in files if not f.mime_type.startswith(GOOGLE_NATIVE_PREFIX)}
+        # Drive path -> (download path, file name, bytes, mime type); Markdown files are offered as PDF
+        payload = {}
+        for path, f in files:
+            if not f.mime_type.startswith(GOOGLE_NATIVE_PREFIX):
+                file_name, data, mime = as_download(f.name, file_bytes(f), f.mime_type)
+                payload[path] = (path.removesuffix(f.name) + file_name, file_name, data, mime)
         if "zip" not in cache:
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                for path, data in payload.items():
-                    zf.writestr(f"{name}/{path}", data)
+                for download_path, _, data, _ in payload.values():
+                    zf.writestr(f"{name}/{download_path}", data)
             cache["zip"] = buf.getvalue()
     if not outcome.ok:
         return
@@ -621,7 +671,8 @@ def render_downloads() -> None:
     st.download_button("Download all as ZIP", cache["zip"], file_name=f"{name}.zip", mime="application/zip", type="primary", on_click="ignore")
     for path, f in files:
         if path in payload:
-            st.download_button(f"{path}", payload[path], file_name=f.name, mime=f.mime_type, key=f"dl-{f.id}", on_click="ignore")
+            download_path, file_name, data, mime = payload[path]
+            st.download_button(download_path, data, file_name=file_name, mime=mime, key=f"dl-{f.id}", on_click="ignore")
         else:
             st.caption(f"{path} (Google Docs file, open it in Drive)")
 
@@ -669,7 +720,7 @@ def render_saved_plan(kind: PlanKind, plan_file: DriveFile | None, button: str) 
     text = file_bytes(plan_file).decode("utf-8")
     with st.container(border=True):
         st.markdown(text)
-    st.download_button(f"Download {kind.file}", text, file_name=kind.file, mime="text/markdown", key=f"dl-{kind.key}", on_click="ignore")
+    pdf_download_button(kind.file, text, key=f"dl-{kind.key}")
 
 
 def render_medicine_lists(lists: list[tuple[int, DriveFile]]) -> None:
@@ -686,7 +737,7 @@ def render_medicine_lists(lists: list[tuple[int, DriveFile]]) -> None:
     text = file_bytes(list_file).decode("utf-8")
     with st.container(border=True):
         st.markdown(text)
-    st.download_button(f"Download {list_file.name}", text, file_name=list_file.name, mime="text/markdown", key="dl-medicine", on_click="ignore")
+    pdf_download_button(list_file.name, text, key="dl-medicine")
 
 
 def render_new_plan() -> None:
@@ -700,7 +751,7 @@ def render_new_plan() -> None:
             st.rerun()
     with st.container(border=True):
         st.markdown(text)
-    st.download_button(f"Download {kind.file}", text, file_name=kind.file, mime="text/markdown", type="primary", on_click="ignore")
+    pdf_download_button(kind.file, text, type="primary")
 
 
 def screen_new() -> None:
@@ -817,8 +868,7 @@ def screen_medicine() -> None:
             st.rerun()
     with st.container(border=True):
         st.markdown(text)
-    st.download_button(f"Download {medicine_file(number)}", text, file_name=medicine_file(number),
-                       mime="text/markdown", on_click="ignore")
+    pdf_download_button(medicine_file(number), text)
 
     st.subheader("2. Your recommendations")
     st.caption(f"Describe the changes you want. A new list is created from {medicine_file(number)} and your input; "
@@ -849,6 +899,101 @@ def run_medicine_request(extra_input: str, force: bool) -> bool:
     return outcome.ok
 
 
+# ================================================================ records chat (slide-up panel on the search screen)
+
+CHAT_CSS = """
+<style>
+.st-key-chat-launcher, .st-key-chat-panel { position: fixed; right: 24px; z-index: 999990; }
+.st-key-chat-launcher { bottom: 24px; width: auto !important; }
+.st-key-chat-launcher button { border-radius: 999px; padding: 0.6rem 1.2rem; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25); }
+.st-key-chat-panel {
+  bottom: 0; width: min(460px, calc(100vw - 32px)) !important; padding: 0.75rem 1rem 1rem;
+  background: %(background)s; border: 1px solid %(border)s; border-bottom: none;
+  border-radius: 14px 14px 0 0; box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.25);
+  %(animation)s
+}
+.st-key-chat-messages { height: min(440px, 55vh) !important; }
+@keyframes chat-slide-up { from { transform: translateY(100%%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+@media (max-width: 640px) { .st-key-chat-launcher, .st-key-chat-panel { right: 16px; } }
+</style>
+"""
+
+
+def records_chat() -> None:
+    """Floating "Ask about patients" button that slides up a chat over every patient's records."""
+    dark = st.context.theme.type == "dark"
+    st.html(CHAT_CSS % {
+        "background": "#0e1117" if dark else "#ffffff",
+        "border": "rgba(250, 250, 250, 0.2)" if dark else "rgba(49, 51, 63, 0.2)",
+        "animation": "animation: chat-slide-up 0.28s ease-out;" if st.session_state.chat_animate else "",
+    })
+    st.session_state.chat_animate = False
+
+    if not st.session_state.chat_open:
+        with st.container(key="chat-launcher"):
+            if st.button("💬 Ask about patients", type="primary"):
+                st.session_state.chat_open = True
+                st.session_state.chat_animate = True
+                st.rerun()
+        return
+
+    with st.container(key="chat-panel"):
+        with st.container(horizontal=True, vertical_alignment="center"):
+            st.markdown("**💬 Patient records assistant**", width="stretch")
+            if st.button("New chat", key="chat-clear", disabled=not st.session_state.chat_turns):
+                st.session_state.chat_turns = []
+                st.session_state.chat_patients = []
+                st.rerun()
+            if st.button("✕", key="chat-close", help="Close"):
+                st.session_state.chat_open = False
+                st.rerun()
+
+        messages = st.container(key="chat-messages", height=440, autoscroll=True)
+        with messages:
+            if not st.session_state.chat_turns:
+                st.caption("Ask about any patient (use their name), or about all records, for example "
+                           "“Which patients were given Pulsatilla?” Search picks the relevant records; "
+                           "only those are sent to the AI.")
+            for turn in st.session_state.chat_turns:
+                render_chat_turn(turn)
+        question = st.chat_input("Ask about a patient or all records…", key="chat-input")
+
+    if question and question.strip():
+        with messages:
+            st.chat_message("user").markdown(question)
+            with st.chat_message("assistant"):
+                if ask_records(question.strip()):
+                    st.rerun()
+
+
+def render_chat_turn(turn: dict) -> None:
+    st.chat_message("user").markdown(turn["question"])
+    with st.chat_message("assistant"):
+        st.markdown(turn["answer"])
+        with st.expander(f"Records used: {len(turn['sources'])} · about {turn['chars'] // 4:,} tokens"):
+            for source in turn["sources"] or ["Only the patient list (search found no matching records)"]:
+                st.caption(source)
+
+
+def ask_records(question: str) -> bool:
+    """Search the records locally, then send only the matches with the question to the AI."""
+    progress = st.empty()
+    history = [(t["question"], t["answer"]) for t in st.session_state.chat_turns]
+    with guarded("answering the question") as outcome, st.spinner("Searching records…"):
+        index = records_index()
+        index.refresh(client(), st.session_state.root_id, progress.caption)
+        context = index.build_context(question, st.session_state.chat_patients)
+        progress.caption(f"Found {len(context.sources)} record(s). Asking {ai.provider_label()}…")
+        answer = ai.answer_question(question, context.text, history)
+    progress.empty()
+    if outcome.ok:
+        st.session_state.chat_turns.append(
+            {"question": question, "answer": answer, "sources": context.sources, "chars": context.chars}
+        )
+        st.session_state.chat_patients = context.patients
+    return outcome.ok
+
+
 # ================================================================ main
 
 SCREENS = {
@@ -867,9 +1012,15 @@ def main() -> None:
         return
     sidebar()
     screen = st.session_state.screen
+    if st.session_state.drive is not None and not isinstance(st.session_state.drive, drive.Drive):
+        # drive.py was edited while the app was running: Streamlit reloaded the module, but this session still
+        # holds a client built from the old class. The login screen reconnects from the saved token.
+        st.session_state.drive = None
     if st.session_state.drive is None:
         screen = "login"
     SCREENS[screen]()
+    if screen == "search":
+        records_chat()
 
 
 main()

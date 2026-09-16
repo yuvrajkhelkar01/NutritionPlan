@@ -99,13 +99,14 @@ Anyone with the URL reaches the password screen, so use a strong `APP_PASSWORD`.
 ## Using the app
 
 - **Search**: finds patient folders by name, ignoring case. Partial matches appear as a pick-list.
+- **💬 Ask about patients** (button at the bottom right of the search screen): opens a chat panel for questions about one patient ("What is Asha Rao's current diet plan?") or about all records ("Which patients were given Pulsatilla?"). The app itself finds the records, with a local keyword search (BM25) over every Markdown/text file in `NutritionPlan/` plus patient-name matching (typos allowed). Only the records it finds are sent to the AI with the question, so the AI spends no tokens looking for files. A named patient's current documents are sent in full (up to 3 patients); otherwise the best-matching sections are sent. Older plan and medicine-list versions are included only when the question asks about the past ("previous", "changed", "history"…). A follow-up that names no patient stays on the patient from the previous question. Under each answer, **Records used** lists what was sent and roughly how many tokens it used. The first question after the app starts downloads the text files (photos are skipped because `Info.md` already has their transcription). After that, only new or changed files are downloaded.
 - **New case study**: when no patient matches, upload photos (or use the camera) and add observations. The app creates the folders, transcribes the photos into `Info.md`, and writes `Extra_info.md`. No plan is generated.
 - **Update Case Study**: adds photos (or replaces them all, after you confirm) and appends dated observations. `Info.md` is regenerated only when photos were added or replaced; observations alone make no AI call. Saving does not create a plan.
 - **Request Diet Plan**: if `Info.md`, `Extra_info.md` or a photo changed since `NutritionPlan.md` was saved, the app reads them, sends them with the saved plan to the AI, and overwrites `NutritionPlan.md`. If nothing changed, the saved plan is shown without an AI call; use **Regenerate anyway** to force a new one.
 - **Request Exercise Plan**: the same, for `Exercise_Plan/ExercisePlan.md`.
 - Older numbered plans (`PlanN.md`, `ExercisePlanN.md`) from earlier app versions are left in Drive. The newest one is used until the first new plan is saved.
 - **Homeopathic Medicines**: opens a page with two steps. (1) **Generate recommendations** from `Info.md` and `Extra_info.md`, plus optional input for this request. If nothing was added since the last list and the input box is empty, the last list is shown without an AI call (**Generate new recommendations anyway** forces one). (2) Type **your recommendations** and click **Create revised list**. The AI rewrites the list shown, applying your changes. Each list is a single table: Recommendation, Potency, Rate. Each list is saved as the next `MedicineListN.md` with your input quoted at the top, so earlier lists are kept. You can revise as many times as you like.
-- **Download Case files / Open Patient Case Study**: download individual files or a ZIP, or read everything in the app.
+- **Download Case files / Open Patient Case Study**: download individual files or a ZIP, or read everything in the app. Documents (case notes, observations, plans, medicine lists) download as **PDF**; they stay as Markdown in Drive because the AI reads them. Photos download unchanged.
 
 Replaced photos go to Drive **trash**, so they can be recovered for 30 days.
 
@@ -116,6 +117,7 @@ Replaced photos go to Drive **trash**, so they can be recovered for 30 days.
 - `prompts/exercise_template.md` / `prompts/exercise_system.md`: the same for exercise plans.
 - `prompts/medicine_template.md` / `prompts/medicine_system.md`: the same for homeopathic medicine lists.
 - `prompts/info_system.md`: how the handwritten notes are transcribed.
+- `prompts/chat_system.md`: how the records chat answers questions.
 
 Changes take effect on the next AI call. You don't need to restart the app.
 
@@ -135,7 +137,8 @@ Changes take effect on the next AI call. You don't need to restart the app.
 |---|---|
 | `app.py` | Streamlit UI and screen flow |
 | `drive.py` | Google OAuth and Drive helpers |
-| `ai.py` | Transcription, nutrition/exercise plans and medicine recommendations (Claude / Gemini / OpenAI) |
+| `ai.py` | Transcription, nutrition/exercise plans, medicine recommendations and chat answers (Claude / Gemini / OpenAI) |
+| `chat.py` | Local search index for the records chat: picks the records sent to the AI |
 | `config.py` | Reads `.env` |
 | `prompts/` | Editable AI prompts and the plan templates |
 | `Note.md` | Development notes |
