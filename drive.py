@@ -6,6 +6,8 @@ Drive layout (names must match exactly):
     NutritionPlan/<PatientName>/Documents/Info.md
     NutritionPlan/<PatientName>/Documents/Extra_info.md
     NutritionPlan/<PatientName>/Nutrition_Plan/Plan1.md, Plan2.md, ...
+    NutritionPlan/<PatientName>/Exercise_Plan/ExercisePlan1.md, ExercisePlan2.md, ...
+    NutritionPlan/<PatientName>/Homeopathic_Medicine/MedicineList1.md, MedicineList2.md, ...
 """
 from __future__ import annotations
 
@@ -36,9 +38,13 @@ ROOT_FOLDER = "NutritionPlan"
 DOCUMENTS = "Documents"
 PHOTOS = "Photos"
 PLANS = "Nutrition_Plan"
+EXERCISE_PLANS = "Exercise_Plan"
+MEDICINE = "Homeopathic_Medicine"
 INFO_FILE = "Info.md"
 EXTRA_INFO_FILE = "Extra_info.md"
-PLAN_NAME_RE = re.compile(r"^Plan(\d+)\.md$")
+PLAN_PREFIX = "Plan"  # Nutrition_Plan/PlanN.md
+EXERCISE_PLAN_PREFIX = "ExercisePlan"  # Exercise_Plan/ExercisePlanN.md
+MEDICINE_LIST_PREFIX = "MedicineList"  # Homeopathic_Medicine/MedicineListN.md
 
 RESUMABLE_THRESHOLD = 5 * 1024 * 1024
 LOGIN_TIMEOUT_SECONDS = 180
@@ -176,6 +182,8 @@ class PatientFolders:
     documents: str
     photos: str
     plans: str
+    exercise_plans: str
+    medicine: str
 
 
 def _quote(value: str) -> str:
@@ -289,7 +297,9 @@ class Drive:
         documents = self.get_or_create_folder(patient.id, DOCUMENTS)
         photos = self.get_or_create_folder(documents, PHOTOS)
         plans = self.get_or_create_folder(patient.id, PLANS)
-        return PatientFolders(patient, documents, photos, plans)
+        exercise_plans = self.get_or_create_folder(patient.id, EXERCISE_PLANS)
+        medicine = self.get_or_create_folder(patient.id, MEDICINE)
+        return PatientFolders(patient, documents, photos, plans, exercise_plans, medicine)
 
     # --- files
 
@@ -321,18 +331,19 @@ class Drive:
 
     # --- plans
 
-    def list_plans(self, plans_id: str) -> list[tuple[int, DriveFile]]:
-        """PlanN.md files as (N, file), oldest first."""
+    def list_plans(self, plans_id: str, prefix: str = PLAN_PREFIX) -> list[tuple[int, DriveFile]]:
+        """<prefix>N.md files (e.g. PlanN.md) as (N, file), oldest first."""
+        name_re = re.compile(rf"^{re.escape(prefix)}(\d+)\.md$")
         plans = []
         for f in self.list_children(plans_id, folders=False):
-            match = PLAN_NAME_RE.match(f.name)
+            match = name_re.match(f.name)
             if match:
                 plans.append((int(match.group(1)), f))
         return sorted(plans, key=lambda p: p[0])
 
-    def save_new_plan(self, plans_id: str, number: int, text: str) -> str:
-        """Save PlanN.md. Refuses to overwrite: existing plans are never modified."""
-        name = f"Plan{number}.md"
+    def save_new_plan(self, plans_id: str, number: int, text: str, prefix: str = PLAN_PREFIX) -> str:
+        """Save <prefix>N.md. Refuses to overwrite: existing plans are never modified."""
+        name = f"{prefix}{number}.md"
         if self.find_child(plans_id, name, folder=False):
             raise DriveError(f"{name} already exists; not overwriting it. Request the plan again.")
         self.upload_bytes(plans_id, name, text.encode("utf-8"), MARKDOWN_MIME)

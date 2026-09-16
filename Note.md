@@ -3,12 +3,12 @@
 > Living document. Read this first at the start of every new chat to get context.
 > Update it whenever something meaningful changes (decisions, features, setup, open issues).
 
-**Last updated:** 2026-09-15
+**Last updated:** 2026-09-16
 
 ---
 
 ## 1. Project Overview
-- **What:** A personal, single-user Streamlit app for a doctor. The doctor photographs handwritten patient notes, and the app stores them per patient in their own Google Drive. An AI transcribes the notes into `Info.md` and generates a versioned nutrition plan (`Plan1.md`, `Plan2.md`, …) from the notes, the doctor's typed remarks and the previous plan.
+- **What:** A personal, single-user Streamlit app for a doctor. The doctor photographs handwritten patient notes, and the app stores them per patient in their own Google Drive. An AI transcribes the notes into `Info.md` and generates a versioned nutrition plan (`Plan1.md`, `Plan2.md`, …) and, on request, a versioned basic exercise plan (`ExercisePlan1.md`, …) from the notes, the doctor's typed remarks and the previous plan of that type. It also gives homeopathic medicine recommendations (`MedicineListN.md`) that the doctor can revise with their own input.
 - **User:** only the doctor. No multi-user features, sharing or deployment; it runs locally.
 - **Location:** `/home/yuvraj/projects/NutritionPlan` (WSL2 / Linux)
 - **Original spec:** the "Build Prompt: Personal Patient Case-Study & Nutrition Plan App" given in the first build chat (2026-09-15). The wireframe `NutritionPlanInterface.png` it mentions has **not** been added to the project.
@@ -32,7 +32,11 @@ NutritionPlan/
 ├── prompts/
 │   ├── info_system.md  # transcription instructions
 │   ├── plan_system.md  # plan-writing instructions ({{PLAN_TEMPLATE}} placeholder)
-│   └── plan_template.md# plan sections (doctor can edit)
+│   ├── plan_template.md# plan sections (doctor can edit)
+│   ├── exercise_system.md   # exercise-plan instructions
+│   ├── exercise_template.md # exercise-plan sections (doctor can edit)
+│   ├── medicine_system.md   # homeopathic recommendation instructions
+│   └── medicine_template.md # medicine-list sections (doctor can edit)
 ├── requirements.txt
 ├── .env.example        # copy to .env
 ├── .gitignore          # ignores .env, credentials.json, token.json, .venv
@@ -40,7 +44,7 @@ NutritionPlan/
 └── Note.md
 ```
 
-Drive layout (must match exactly): `NutritionPlan/<Patient>/Documents/{Photos/, Info.md, Extra_info.md}` and `NutritionPlan/<Patient>/Nutrition_Plan/PlanN.md`.
+Drive layout (must match exactly): `NutritionPlan/<Patient>/Documents/{Photos/, Info.md, Extra_info.md}` `NutritionPlan/<Patient>/Nutrition_Plan/PlanN.md` `NutritionPlan/<Patient>/Exercise_Plan/ExercisePlanN.md` and `NutritionPlan/<Patient>/Homeopathic_Medicine/MedicineListN.md`.
 
 ## 4. Setup & Run
 See `README.md`. In short:
@@ -58,6 +62,10 @@ See `README.md`. In short:
 - Plan generation: sends Info.md (photos only if Info.md is missing), Extra_info.md and the latest plan with the "Review this previous plan…" instruction; saves the next `PlanN.md` and never overwrites.
 - Spinners/status for uploads and AI calls; Drive and AI errors shown on the page instead of crashing.
 
+### Done (2026-09-16)
+- **Exercise plan**: "🏃 Request Exercise Plan" button on the patient screen. Uses Info.md (photos if missing), Extra_info.md and the latest exercise plan; saves `Exercise_Plan/ExercisePlanN.md` (never overwrites). Shown with a version dropdown under "Exercise plan" in Open Case Study; included in downloads/ZIP. Not auto-generated for new patients.
+- **Homeopathic medicines**: "💊 Homeopathic Medicines" button opens the `medicine` screen. Output is a Recommendation/Potency/Rate table only. Step 1: optional extra input + "Generate recommendations" (Info.md + Extra_info.md, fresh; does not use earlier lists). Step 2 (shown once a list is on screen): "Doctor's recommendations" + "Create revised list" → the AI revises the list on screen, applying the doctor's changes first. Every list is saved as the next `MedicineListN.md` (header notes "revised from MedicineListM.md"; the doctor's input is quoted under `## Doctor's Input`). Revisions can repeat. Listed in Open Case Study and included in downloads.
+
 ### Planned / Backlog
 - _Nothing agreed yet._ Possible ideas: a button to regenerate Info.md on its own; HEIC photo support.
 
@@ -74,6 +82,11 @@ See `README.md`. In short:
 | 2026-09-15 | Photos sent to the AI are EXIF-rotated, downscaled to 2400px and re-encoded as JPEG q90; originals stored untouched | Stays under provider image limits while keeping handwriting legible |
 | 2026-09-15 | Plan generation uses Info.md whenever it exists | Info.md is always regenerated when photos change, so it is current; avoids re-sending every photo |
 | 2026-09-15 | "Add" mode regenerates Info.md from **all** photos (existing + new) | Keeps one coherent transcription and summary |
+| 2026-09-16 | Exercise plans live in a separate `Exercise_Plan/` folder named `ExercisePlanN.md`, with their own prompt/template (`prompts/exercise_*.md`) | Independent versioning from nutrition plans; distinct file names so individual downloads don't clash with `PlanN.md` |
+| 2026-09-16 | Medicine recommendations: every generated or revised list is a new `MedicineListN.md` with the doctor's input quoted in it; "Generate" starts fresh, and only "Create revised list" builds on an earlier list | Keeps a record of every revision and who asked for what; matches the two-step flow the user described |
+| 2026-09-16 | Medicine prompt: follow the doctor's instructions even when concerned (concern goes under Cautions); never advise stopping conventional medication; point out red flags | The doctor is the prescriber; patient safety |
+| 2026-09-16 | Gemini calls retry up to 3 times on 5xx `ServerError` (waits 3 s, then 8 s); 4xx errors are not retried | A real test hit `503 UNAVAILABLE` ("high demand") |
+| 2026-09-16 | Exercise plan is only generated on request (not with Plan1 on patient creation) | The user asked for an extra option; avoids an extra AI call per new patient |
 | 2026-09-15 | App writes a header line on Info.md and each plan (timestamp, provider/model, "AI draft for clinician review") | Traceability |
 
 ## 7. Open Questions / Issues
@@ -84,6 +97,10 @@ See `README.md`. In short:
 - Privacy: patient data goes to Google Drive and the AI provider. The doctor should confirm this meets patient-consent and data-protection rules.
 
 ## 8. Changelog
+- **2026-09-16**: The user asked for **less text in medicine lists**, so the AI now outputs only a table: `| Recommendation | Potency | Rate |` (Rate = dose, frequency, duration). Removed the case summary, rationale, instructions, cautions, missing info and changes sections from `medicine_template.md` / `medicine_system.md` and the matching instructions in `ai.recommend_medicines`. The prompt still says not to stop conventional medication, but the output no longer has a cautions section. The app still adds the title, the "Generated…" line and `## Doctor's Input` (for revisions). Real Gemini test: MedicineList4 (3 rows) → revised MedicineList5 (removed the last medicine, Kali bich 30C twice daily for 5 days), table only. Fake tests 17/17. Server restarted.
+- **2026-09-16**: Added **homeopathic medicine recommendations**. `drive.py`: `Homeopathic_Medicine` folder, `MEDICINE_LIST_PREFIX`. `ai.py`: `recommend_medicines(name, info, extra, doctor_input, current_list=None, photos=None)`; shared `_system()` / `_case_parts()` helpers; Gemini retry on server errors. `app.py`: `MEDICINE` PlanKind, `screen_medicine`, `generate_and_save_medicines`, shared `read_case()` / `save_next_version()`; patient screen buttons are now 4 rows (Download/Open, Diet/Exercise, Medicines, Update/Back); version dropdown label is now "Version". New prompts `medicine_system.md` / `medicine_template.md` (case summary, ranked medicine table with potency/dose/duration, rationale, instructions, cautions, missing info, changes). Tests: 17/17 medicine tests with a fake Drive (including AI failure, empty revision input, chained revisions, back navigation, downloads), and the earlier 13 edge tests plus the smoke test still pass. Real Gemini + Drive on "yuvraj": MedicineList1 generated; the first revision hit Gemini 503 (the app showed the error, nothing was saved, the input was kept), so I added the retry; the rerun created MedicineList2, which applied every instruction (removed Lycopodium, Kali bichromicum 30C twice daily for 5 days at rank 1, shorter instructions) with a correct Changes section. Restarted the local Streamlit server.
+- **2026-09-16**: Testing the exercise-plan feature. Localhost showed `AttributeError: module 'drive' has no attribute 'PLAN_PREFIX'`. The code was fine; the Streamlit server had been started before the edits, and a Streamlit rerun reloads `app.py` but keeps already-imported modules (`drive`, `ai`). **Restart `streamlit run` after changing `drive.py`/`ai.py`/`config.py`.** 13 edge-case tests with a fake Drive passed: a patient created before this feature (no `Exercise_Plan/` folder), an AI failure (error shown, nothing saved), versioning kept separate from nutrition plans, stray files ignored, downloads, and the update/back flows. Real Drive + Gemini run on test patient "yuvraj": pass. Found that Gemini left out "Changes from Previous Plan" on exercise updates (the template said "from Plan 2 onward"), so I reworded the exercise template and made the update instruction in `ai.py` name that section; `ExercisePlan3.md` then included it. Test patient "yuvraj" now has ExercisePlan1–3.
+- **2026-09-16**: Added **exercise plans**. `drive.py`: `Exercise_Plan` folder (created on demand for existing patients too), `list_plans`/`save_new_plan` take a file-name prefix. `ai.py`: `generate_plan(..., kind="nutrition"|"exercise")` with `PLAN_PROMPTS`. `app.py`: `PlanKind` (NUTRITION/EXERCISE), new button (patient screen buttons now 3 rows: Download/Open, Diet/Exercise plan, Update/Back), exercise plan section in Open Case Study; `last_plan` is now `(kind, number, text)`. New prompts `exercise_system.md` / `exercise_template.md` (precautions, weekly plan, sample week, progression, stop-and-seek-advice signs). README and PRIVACY updated. Smoke-tested with a fake Drive + mocked AI (create → exercise plan 1 & 2 → diet plan 2 → open case study): pass. Not yet run against a real AI call.
 - **2026-09-16**: Switched to **millionairenext01@gmail.com**. New Cloud project `nutritionplan-508807` with a Desktop OAuth client; the consent screen is **In production** (so no test-user list and no 7-day token expiry; sign-in shows the "unverified app" warning, which is expected). Signed in locally and confirmed via `about.get` that the app acts as millionairenext01. **First real end-to-end run succeeded**: patient "yuvraj" created from a photo → `Info.md` (3,990 chars, Gemini `gemini-3.6-flash`) → `Plan1.md`. Regenerated `.streamlit/secrets.toml` with the new token. Remaining for deployment: paste those secrets into the Streamlit app (`patient-case-study.streamlit.app`) and reboot it. Branding home page should become the Streamlit URL; privacy policy stays on GitHub because the app is password-protected.
 - **2026-09-16**: **Google account `appstorageruk@gmail.com` was disabled by Google** ("created or used with multiple other accounts"), taking Cloud project `nutritionplan-508717` with it: token refresh now fails with `disabled_client: The OAuth client was disabled`. No patient data lost (the Drive folder was still empty). The Gemini API key still works. Moved `credentials.json` / `token.json` to `disabled_account_backup/` (git-ignored) and deleted the stale `.streamlit/secrets.toml`. Switching to **millionairenext01@gmail.com**: needs a new Cloud project, Drive API, OAuth consent (External/Testing + that address as test user), a new **Desktop** client saved as `credentials.json`, then a fresh local login and a regenerated secrets file. No code changes needed. Streamlit app `patient-case-study.streamlit.app` exists but has no secrets yet, so it shows "APP_PASSWORD is not set".
 - **2026-09-15**: Google blocked **Publish app** until the Branding page has an app name, support email, homepage URL and privacy policy URL. Added `PRIVACY.md` (single-user tool; data stays in the owner's Drive; sent to the AI provider; Google API Limited Use statement) and pushed it. Branding URLs: homepage `https://github.com/yuvrajkhelkar01/NutritionPlan`, privacy `https://github.com/yuvrajkhelkar01/NutritionPlan/blob/main/PRIVACY.md`. Both depend on the repo staying **public**; if it's made private, host the policy somewhere else first.

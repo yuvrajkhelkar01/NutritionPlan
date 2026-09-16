@@ -2,11 +2,11 @@
 
 _Last updated: 15 September 2026_
 
-NutritionPlan is a private tool used by a single doctor to organise their own patient case notes and draft nutrition plans. It is not a public service, and nobody other than its owner can sign up for it or use it.
+NutritionPlan is a private tool used by a single doctor to organise their own patient case notes and draft nutrition and exercise plans and homeopathic medicine recommendations. It is not a public service, and nobody other than its owner can sign up for it or use it.
 
 ## What the app accesses
 
-- **Google Drive:** after the owner signs in with Google, the app reads and writes files in the owner's own Google Drive, inside a folder named `NutritionPlan`. That folder holds case-note photos, transcriptions, the doctor's remarks and nutrition plans. The app does not use any other Google data.
+- **Google Drive:** after the owner signs in with Google, the app reads and writes files in the owner's own Google Drive, inside a folder named `NutritionPlan`. That folder holds case-note photos, transcriptions, the doctor's remarks, nutrition plans, exercise plans and homeopathic medicine lists. The app does not use any other Google data.
 - **AI processing:** to transcribe notes and draft plans, the app sends case-note photos and text to the AI provider the owner configured (currently Google Gemini).
 
 ## What the app stores

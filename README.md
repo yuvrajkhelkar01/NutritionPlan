@@ -1,6 +1,6 @@
 # NutritionPlan
 
-A personal Streamlit app for one doctor. You photograph handwritten patient notes, and the app stores them per patient in your Google Drive. An AI then transcribes the notes and drafts a nutrition plan. Each new plan builds on the previous one, and old plans are never overwritten.
+A personal Streamlit app for one doctor. You photograph handwritten patient notes, and the app stores them per patient in your Google Drive. An AI then transcribes the notes and drafts a nutrition plan and, on request, a basic exercise plan and homeopathic medicine recommendations. Each new plan builds on the previous one, and old plans are never overwritten.
 
 Every AI-generated plan is a draft. Review it before using it.
 
@@ -15,9 +15,15 @@ NutritionPlan/
     │   ├── Photos/          # uploaded case-note photos (jpg/png/pdf)
     │   ├── Info.md          # AI transcription + structured summary
     │   └── Extra_info.md    # your typed remarks, one dated section per update
-    └── Nutrition_Plan/
-        ├── Plan1.md
-        └── Plan2.md …       # one new file per request, never overwritten
+    ├── Nutrition_Plan/
+    │   ├── Plan1.md
+    │   └── Plan2.md …       # one new file per request, never overwritten
+    ├── Exercise_Plan/
+    │   ├── ExercisePlan1.md
+    │   └── ExercisePlan2.md …
+    └── Homeopathic_Medicine/
+        ├── MedicineList1.md
+        └── MedicineList2.md …  # each generated or revised list is a new file
 ```
 
 ## 1. Install
@@ -98,6 +104,8 @@ Anyone with the URL reaches the password screen, so use a strong `APP_PASSWORD`.
 - **New case study**: when no patient matches, upload photos (or use the camera) and add observations. The app creates the folders, transcribes the photos into `Info.md`, writes `Extra_info.md` and generates `Plan1.md`.
 - **Update Case Study**: adds photos (or replaces them all, after you confirm) and appends dated observations. If the photos changed, `Info.md` is regenerated. Saving does not create a plan.
 - **Request Diet Plan**: sends `Info.md` (or the photos if `Info.md` is missing), `Extra_info.md` and the latest plan to the AI, and saves the result as the next `PlanN.md`.
+- **Request Exercise Plan**: same inputs, but with the latest exercise plan, and saves the next `Exercise_Plan/ExercisePlanN.md`. It is never generated automatically.
+- **Homeopathic Medicines**: opens a page with two steps. (1) **Generate recommendations** from `Info.md` and `Extra_info.md`, plus optional input for this request. (2) Type **your recommendations** and click **Create revised list**. The AI rewrites the list shown, applying your changes. Each list is a single table: Recommendation, Potency, Rate. Each list is saved as the next `MedicineListN.md` with your input quoted at the top, so earlier lists are kept. You can revise as many times as you like.
 - **Download Case files / Open Patient Case Study**: download individual files or a ZIP, or read everything in the app.
 
 Replaced photos go to Drive **trash**, so they can be recovered for 30 days.
@@ -106,6 +114,8 @@ Replaced photos go to Drive **trash**, so they can be recovered for 30 days.
 
 - `prompts/plan_template.md`: the sections every plan follows. Edit it to match your practice.
 - `prompts/plan_system.md`: general instructions for plan writing.
+- `prompts/exercise_template.md` / `prompts/exercise_system.md`: the same for exercise plans.
+- `prompts/medicine_template.md` / `prompts/medicine_system.md`: the same for homeopathic medicine lists.
 - `prompts/info_system.md`: how the handwritten notes are transcribed.
 
 Changes take effect on the next AI call. You don't need to restart the app.
@@ -126,9 +136,9 @@ Changes take effect on the next AI call. You don't need to restart the app.
 |---|---|
 | `app.py` | Streamlit UI and screen flow |
 | `drive.py` | Google OAuth and Drive helpers |
-| `ai.py` | Transcription and plan generation (Claude / Gemini / OpenAI) |
+| `ai.py` | Transcription, nutrition/exercise plans and medicine recommendations (Claude / Gemini / OpenAI) |
 | `config.py` | Reads `.env` |
-| `prompts/` | Editable AI prompts and the plan template |
+| `prompts/` | Editable AI prompts and the plan templates |
 | `Note.md` | Development notes |
 
 `credentials.json`, `token.json` and `.env` hold secrets. Keep them private (they are git-ignored).

@@ -1,4 +1,5 @@
-"""AI calls: transcribe handwritten case notes (Info.md) and generate nutrition plans.
+"""AI calls: transcribe handwritten case notes (Info.md), generate nutrition and exercise plans,
+and recommend homeopathic medicines.
 
 The provider is picked with AI_PROVIDER in .env: claude (default), gemini or openai.
 Prompts live in prompts/ so they can be edited without touching code.
@@ -7,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import io
+import time
 from dataclasses import dataclass
 from datetime import date
 
@@ -22,6 +24,15 @@ MAX_OUTPUT_TOKENS = 32000
 
 # Claude models that accept server-side refusal fallbacks (`fallbacks: "default"`).
 CLAUDE_FALLBACK_MODELS = {"claude-opus-5", "claude-fable-5-1"}
+
+# Gemini "model overloaded" style server errors are usually over within seconds: wait this long, then retry.
+GEMINI_RETRY_DELAYS = (3, 8)
+
+# Plan kind -> (system prompt, template) in prompts/.
+PLAN_PROMPTS = {
+    "nutrition": ("plan_system.md", "plan_template.md"),
+    "exercise": ("exercise_system.md", "exercise_template.md"),
+}
 
 
 @dataclass(frozen=True)
@@ -60,9 +71,72 @@ def generate_plan(
     extra_info_md: str,
     previous_plan: tuple[int, str] | None,
     photos: list[Attachment] | None = None,
+    kind: str = "nutrition",
 ) -> str:
-    """Plan body in Markdown (no title). Uses Info.md when present, otherwise the photos."""
-    system = _prompt("plan_system.md").replace("{{PLAN_TEMPLATE}}", _prompt("plan_template.md").strip())
+    """Plan body in Markdown (no title). `kind` is "nutrition" or "exercise".
+
+    Uses Info.md when present, otherwise the photos. `previous_plan` is (version number, text).
+    """
+    system = _system(*PLAN_PROMPTS[kind])
+    parts = _case_parts(patient_name, info_md, extra_info_md, photos)
+
+    if previous_plan:
+        number, text = previous_plan
+        parts.append(f"# Previous {kind} plan (version {number})\n\n{text.strip()}")
+        parts.append(
+            "Review this previous plan and produce an updated plan that accounts for the new information. "
+            'Note explicitly what changed and why in the "Changes from Previous Plan" section.'
+        )
+    else:
+        parts.append('This is the first plan for this patient. Leave out the "Changes from Previous Plan" section.')
+
+    return _complete(system, parts)
+
+
+def recommend_medicines(
+    patient_name: str,
+    info_md: str | None,
+    extra_info_md: str,
+    doctor_input: str,
+    current_list: tuple[int, str] | None = None,
+    photos: list[Attachment] | None = None,
+) -> str:
+    """Homeopathic medicine recommendations as a Markdown table (Recommendation | Potency | Rate).
+
+    Without `current_list` this is a fresh recommendation, and `doctor_input` is optional extra context.
+    With `current_list` (version number, text) the list is revised according to `doctor_input`.
+    """
+    system = _system("medicine_system.md", "medicine_template.md")
+    parts = _case_parts(patient_name, info_md, extra_info_md, photos)
+
+    if current_list:
+        number, text = current_list
+        parts.append(f"# Current recommendation list (version {number})\n\n{text.strip()}")
+        parts.append(f"# Doctor's recommendations\n\n{doctor_input.strip()}")
+        parts.append(
+            "Create a revised recommendation list based on the doctor's recommendations above. "
+            "The doctor's input takes priority: apply every change they ask for, and keep the parts they did not "
+            "comment on unless their input makes them inconsistent. Output only the revised table."
+        )
+    else:
+        if doctor_input.strip():
+            parts.append(f"# Doctor's additional input for this request\n\n{doctor_input.strip()}")
+        parts.append("Write the recommendations as the table only.")
+
+    return _complete(system, parts)
+
+
+# ---------------------------------------------------------------- helpers
+
+
+def _system(system_file: str, template_file: str) -> str:
+    return _prompt(system_file).replace("{{PLAN_TEMPLATE}}", _prompt(template_file).strip())
+
+
+def _case_parts(
+    patient_name: str, info_md: str | None, extra_info_md: str, photos: list[Attachment] | None
+) -> list[str | Attachment]:
+    """Patient name, date, case notes (Info.md, or the photos when it is missing) and Extra_info.md."""
     parts: list[str | Attachment] = [f"Patient name: {patient_name}\nToday's date: {date.today():%Y-%m-%d}"]
 
     if info_md and info_md.strip():
@@ -76,21 +150,7 @@ def generate_plan(
         parts.append("# Case notes\n\nNo case notes or photos are available.")
 
     parts.append(f"# Doctor's extra observations (Extra_info.md)\n\n{extra_info_md.strip() or 'None recorded.'}")
-
-    if previous_plan:
-        number, text = previous_plan
-        parts.append(f"# Previous plan (Plan{number}.md)\n\n{text.strip()}")
-        parts.append(
-            "Review this previous plan and produce an updated plan that accounts for the new information. "
-            "Note explicitly what changed and why."
-        )
-    else:
-        parts.append('This is the first plan for this patient. Leave out the "Changes from Previous Plan" section.')
-
-    return _complete(system, parts)
-
-
-# ---------------------------------------------------------------- helpers
+    return parts
 
 
 def _prompt(name: str) -> str:
@@ -188,21 +248,28 @@ def _gemini(system: str, parts: list[str | Attachment]) -> str:
     if not config.GEMINI_API_KEY:
         raise AIError("GEMINI_API_KEY is not set in .env.")
 
+    from google.genai import errors
+
     contents = [p if isinstance(p, str) else types.Part.from_bytes(data=p.data, mime_type=p.mime_type) for p in parts]
-    try:
-        client = genai.Client(api_key=config.GEMINI_API_KEY)
-        response = client.models.generate_content(
-            model=config.GEMINI_MODEL,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=system,
-                max_output_tokens=MAX_OUTPUT_TOKENS,
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),  # no tools used
-            ),
-        )
-    except Exception as e:
-        raise AIError(f"Gemini API error: {e}") from e
-    return response.text or ""
+    client = genai.Client(api_key=config.GEMINI_API_KEY)
+    for delay in (*GEMINI_RETRY_DELAYS, None):
+        try:
+            response = client.models.generate_content(
+                model=config.GEMINI_MODEL,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=system,
+                    max_output_tokens=MAX_OUTPUT_TOKENS,
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),  # no tools used
+                ),
+            )
+            return response.text or ""
+        except errors.ServerError as e:  # 5xx, e.g. 503 "model is currently experiencing high demand"
+            if delay is None:
+                raise AIError(f"Gemini is temporarily unavailable ({e.code}) after several tries. Wait a minute and try again.") from e
+            time.sleep(delay)
+        except Exception as e:
+            raise AIError(f"Gemini API error: {e}") from e
 
 
 def _openai(system: str, parts: list[str | Attachment]) -> str:

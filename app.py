@@ -12,6 +12,7 @@ import io
 import time
 import zipfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date, datetime
 
 import streamlit as st
@@ -31,6 +32,23 @@ GOOGLE_NATIVE_PREFIX = "application/vnd.google-apps."
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_SECONDS = 300
 
+
+@dataclass(frozen=True)
+class PlanKind:
+    key: str  # ai.PLAN_PROMPTS key
+    title: str  # document title, e.g. "Nutrition Plan"
+    prefix: str  # file name prefix: <prefix>N.md
+    folder: str  # PatientFolders attribute holding these plans
+
+    def file_name(self, number: int) -> str:
+        return f"{self.prefix}{number}.md"
+
+
+NUTRITION = PlanKind("nutrition", "Nutrition Plan", drive.PLAN_PREFIX, "plans")
+EXERCISE = PlanKind("exercise", "Exercise Plan", drive.EXERCISE_PLAN_PREFIX, "exercise_plans")
+MEDICINE = PlanKind("medicine", "Homeopathic Medicine List", drive.MEDICINE_LIST_PREFIX, "medicine")
+PLAN_KINDS = {k.key: k for k in (NUTRITION, EXERCISE, MEDICINE)}
+
 DEFAULT_STATE = {
     "authenticated": False,  # passed the app password in this browser session
     "screen": "login",
@@ -40,11 +58,12 @@ DEFAULT_STATE = {
     "search_query": "",
     "matches": [],  # pick-list after an ambiguous search
     "view": None,  # panel on the patient screen: download | open | plan
-    "last_plan": None,  # (number, markdown) of the plan just generated
+    "last_plan": None,  # (plan kind key, number, markdown) of the plan just generated
     "cache": {},  # patient id -> data already fetched from Drive this session
     "flash": None,  # one-off success message
     "form_nonce": 0,  # bumped to clear upload/text widgets
     "camera_shots": [],  # [(sha1, Attachment)] captured with the camera
+    "medicine_list": None,  # (number, markdown) of the medicine list shown on the medicine screen
 }
 
 
@@ -128,7 +147,9 @@ def case_listing() -> dict:
             "info": docs.get(drive.INFO_FILE),
             "extra": docs.get(drive.EXTRA_INFO_FILE),
             "photos": client().list_children(f.photos, folders=False),
-            "plans": client().list_plans(f.plans),
+            "plans": client().list_plans(f.plans, NUTRITION.prefix),
+            "exercise_plans": client().list_plans(f.exercise_plans, EXERCISE.prefix),
+            "medicine": client().list_plans(f.medicine, MEDICINE.prefix),
         }
     return cache["listing"]
 
@@ -162,11 +183,23 @@ def extra_info_entry(notes: str) -> str:
     return f"## {date.today():%Y-%m-%d}\n\n{notes.strip()}\n"
 
 
-def compose_plan(number: int, name: str, body: str) -> str:
+def compose_plan(kind: PlanKind, number: int, name: str, body: str) -> str:
     return (
-        f"# Nutrition Plan {number}: {name}\n\n"
+        f"# {kind.title} {number}: {name}\n\n"
         f"_Generated {timestamp()} by {ai.provider_label()}. AI draft for clinician review._\n\n{body}\n"
     )
+
+
+def compose_medicine_list(number: int, name: str, body: str, doctor_input: str, revised_from: int | None) -> str:
+    source = f", revised from {MEDICINE.file_name(revised_from)} using the doctor's input" if revised_from else ""
+    text = (
+        f"# {MEDICINE.title} {number}: {name}\n\n"
+        f"_Generated {timestamp()} by {ai.provider_label()}{source}. AI draft for clinician review._\n\n"
+    )
+    if doctor_input.strip():
+        quoted = "\n".join(f"> {line}".rstrip() for line in doctor_input.strip().splitlines())
+        text += f"## Doctor's Input\n\n{quoted}\n\n"
+    return text + f"{body}\n"
 
 
 # ================================================================ Drive + AI workflows
@@ -184,33 +217,64 @@ def upload_photos(f: PatientFolders, photos: list[Attachment], log) -> list[Atta
     return saved
 
 
-def generate_and_save_plan(log) -> tuple[int, str]:
+def read_case(f: PatientFolders, log) -> tuple[str | None, str, list[Attachment]]:
+    """(Info.md, Extra_info.md, photos). Photos are only downloaded when Info.md is missing."""
+    log("Reading the case study from Drive…")
+    info_md = client().read_text(f.documents, drive.INFO_FILE)
+    extra_md = client().read_text(f.documents, drive.EXTRA_INFO_FILE) or ""
+    photos = []
+    if not (info_md and info_md.strip()):
+        log("Info.md not found, so the photos will be sent instead…")
+        photos = [download_attachment(x) for x in client().list_children(f.photos, folders=False)
+                  if x.mime_type in ai.SUPPORTED_MIMES]
+    return info_md, extra_md, photos
+
+
+def save_next_version(kind: PlanKind, f: PatientFolders, compose, log) -> tuple[int, str]:
+    """Save compose(number) as the next <prefix>N.md; returns (number, text)."""
+    plans_id = getattr(f, kind.folder)
+    latest = client().list_plans(plans_id, kind.prefix)  # listed just before saving in case one was added meanwhile
+    number = latest[-1][0] + 1 if latest else 1
+    text = compose(number)
+    log(f"Saving {kind.file_name(number)} to Drive…")
+    client().save_new_plan(plans_id, number, text, kind.prefix)
+    return number, text
+
+
+def generate_and_save_plan(kind: PlanKind, log) -> tuple[str, int, str]:
     f, name = folders(), st.session_state.patient.name
+    plans_id = getattr(f, kind.folder)
     try:
-        log("Reading the case study from Drive…")
-        info_md = client().read_text(f.documents, drive.INFO_FILE)
-        extra_md = client().read_text(f.documents, drive.EXTRA_INFO_FILE) or ""
-        plans = client().list_plans(f.plans)
+        info_md, extra_md, photos = read_case(f, log)
+        plans = client().list_plans(plans_id, kind.prefix)
         previous = None
         if plans:
             number, plan_file = plans[-1]
             previous = (number, client().download_bytes(plan_file.id, plan_file.name).decode("utf-8"))
 
-        photos = []
-        if not (info_md and info_md.strip()):
-            log("Info.md not found, so the photos will be sent instead…")
-            photos = [download_attachment(x) for x in client().list_children(f.photos, folders=False)
-                      if x.mime_type in ai.SUPPORTED_MIMES]
+        updating = f" (updating {kind.file_name(previous[0])})" if previous else ""
+        log(f"Writing the {kind.title.lower()} with {ai.provider_label()}{updating}…")
+        body = ai.generate_plan(name, info_md, extra_md, previous, photos, kind=kind.key)
+        number, text = save_next_version(kind, f, lambda n: compose_plan(kind, n, name, body), log)
+        return kind.key, number, text
+    finally:
+        invalidate_patient_cache()
 
-        log(f"Writing the plan with {ai.provider_label()}{' (updating Plan%d)' % previous[0] if previous else ''}…")
-        body = ai.generate_plan(name, info_md, extra_md, previous, photos)
 
-        latest = client().list_plans(f.plans)  # re-list in case a plan was added meanwhile
-        number = latest[-1][0] + 1 if latest else 1
-        text = compose_plan(number, name, body)
-        log(f"Saving Plan{number}.md to Drive…")
-        client().save_new_plan(f.plans, number, text)
-        return number, text
+def generate_and_save_medicines(doctor_input: str, current: tuple[int, str] | None, log) -> tuple[int, str]:
+    """New homeopathic medicine list: fresh when `current` is None, otherwise `current` revised with the doctor's input."""
+    f, name = folders(), st.session_state.patient.name
+    try:
+        info_md, extra_md, photos = read_case(f, log)
+        if current:
+            log(f"Revising {MEDICINE.file_name(current[0])} with your recommendations using {ai.provider_label()}…")
+        else:
+            log(f"Writing homeopathic medicine recommendations with {ai.provider_label()}…")
+        body = ai.recommend_medicines(name, info_md, extra_md, doctor_input, current, photos)
+        revised_from = current[0] if current else None
+        return save_next_version(
+            MEDICINE, f, lambda n: compose_medicine_list(n, name, body, doctor_input, revised_from), log
+        )
     finally:
         invalidate_patient_cache()
 
@@ -443,23 +507,33 @@ def screen_patient() -> None:
 
     row1 = st.columns(2)
     row2 = st.columns(2)
+    row3 = st.columns(2)
+    row4 = st.columns(2)
     if row1[0].button("⬇️ Download Case files", width="stretch"):
         st.session_state.view = "download"
     if row1[1].button("📖 Open Patient Case Study", width="stretch"):
         st.session_state.view = "open"
-    if row2[0].button("✏️ Update Case Study", width="stretch"):
+    requested = None
+    if row2[0].button("🥗 Request Diet Plan", type="primary", width="stretch"):
+        requested = NUTRITION
+    if row2[1].button("🏃 Request Exercise Plan", type="primary", width="stretch"):
+        requested = EXERCISE
+    if row3[0].button("💊 Homeopathic Medicines", type="primary", width="stretch"):
+        reset_form()
+        go("medicine", view=None, medicine_list=None)
+    if row4[0].button("✏️ Update Case Study", width="stretch"):
         reset_form()
         go("update")
-    request_plan = row2[1].button("🥗 Request Diet Plan", type="primary", width="stretch")
-    if st.button("← Back to search"):
+    if row4[1].button("← Back to search", width="stretch"):
         go("search", patient=None, view=None, last_plan=None)
     st.divider()
 
-    if request_plan:
+    if requested:
         st.session_state.view = None
-        with guarded("generating the diet plan") as outcome, st.status("Generating diet plan…", expanded=True) as status:
-            st.session_state.last_plan = generate_and_save_plan(st.write)
-            status.update(label=f"Saved Plan{st.session_state.last_plan[0]}.md", state="complete", expanded=False)
+        label = requested.title.lower()
+        with guarded(f"generating the {label}") as outcome, st.status(f"Generating {label}…", expanded=True) as status:
+            st.session_state.last_plan = generate_and_save_plan(requested, st.write)
+            status.update(label=f"Saved {requested.file_name(st.session_state.last_plan[1])}", state="complete", expanded=False)
         if outcome.ok:
             st.session_state.view = "plan"
 
@@ -526,31 +600,41 @@ def render_case_study() -> None:
             st.download_button(f"{other.name}", file_bytes(other), file_name=other.name, mime=other.mime_type, key=f"open-{other.id}", on_click="ignore")
 
         st.subheader("Nutrition plan")
-        plans = listing["plans"]
-        if not plans:
-            st.info("No plans yet. Use **Request Diet Plan** to create one.")
-        else:
-            by_number = dict(plans)
-            numbers = sorted(by_number, reverse=True)
-            number = st.selectbox(
-                "Plan version", numbers,
-                format_func=lambda n: f"Plan{n}.md" + (" (latest)" if n == numbers[0] else ""),
-            )
-            plan_file = by_number[number]
-            text = file_bytes(plan_file).decode("utf-8")
-            with st.container(border=True):
-                st.markdown(text)
-            st.download_button(f"Download Plan{number}.md", text, file_name=plan_file.name, mime="text/markdown", on_click="ignore")
+        render_plan_versions(NUTRITION, listing["plans"], "Request Diet Plan")
+
+        st.subheader("Exercise plan")
+        render_plan_versions(EXERCISE, listing["exercise_plans"], "Request Exercise Plan")
+
+        st.subheader("Homeopathic medicines")
+        render_plan_versions(MEDICINE, listing["medicine"], "Homeopathic Medicines")
     if not outcome.ok:
         st.caption("Try again, or go back to search.")
 
 
-def render_new_plan() -> None:
-    number, text = st.session_state.last_plan
-    st.success(f"Plan{number}.md saved to Drive.")
+def render_plan_versions(kind: PlanKind, plans: list[tuple[int, DriveFile]], button: str) -> None:
+    if not plans:
+        st.info(f"Nothing saved yet. Use **{button}** to create one.")
+        return
+    by_number = dict(plans)
+    numbers = sorted(by_number, reverse=True)
+    number = st.selectbox(
+        "Version", numbers, key=f"version-{kind.key}",
+        format_func=lambda n: kind.file_name(n) + (" (latest)" if n == numbers[0] else ""),
+    )
+    plan_file = by_number[number]
+    text = file_bytes(plan_file).decode("utf-8")
     with st.container(border=True):
         st.markdown(text)
-    st.download_button(f"Download Plan{number}.md", text, file_name=f"Plan{number}.md", mime="text/markdown", type="primary", on_click="ignore")
+    st.download_button(f"Download {plan_file.name}", text, file_name=plan_file.name, mime="text/markdown", key=f"dl-{kind.key}", on_click="ignore")
+
+
+def render_new_plan() -> None:
+    key, number, text = st.session_state.last_plan
+    file_name = PLAN_KINDS[key].file_name(number)
+    st.success(f"{file_name} saved to Drive.")
+    with st.container(border=True):
+        st.markdown(text)
+    st.download_button(f"Download {file_name}", text, file_name=file_name, mime="text/markdown", type="primary", on_click="ignore")
 
 
 def screen_new() -> None:
@@ -575,7 +659,7 @@ def screen_new() -> None:
 
     with guarded("creating the patient") as outcome, st.status(f"Creating case study for {name}…", expanded=True) as status:
         create_patient(name, photos, notes, st.write)
-        st.session_state.last_plan = generate_and_save_plan(st.write)
+        st.session_state.last_plan = generate_and_save_plan(NUTRITION, st.write)
         status.update(label="Case study created and Plan1.md saved", state="complete", expanded=False)
 
     if outcome.ok:
@@ -629,7 +713,58 @@ def screen_update() -> None:
         status.update(label="Case study saved", state="complete", expanded=False)
     if outcome.ok:
         reset_form()
-        go("patient", view=None, last_plan=None, flash="Case study updated. Use Request Diet Plan to generate a new plan.")
+        go("patient", view=None, last_plan=None, flash="Case study updated. Use Request Diet Plan or Request Exercise Plan to generate new plans.")
+
+
+def screen_medicine() -> None:
+    patient = st.session_state.patient
+    if patient is None:
+        go("search")
+    nonce = st.session_state.form_nonce
+    st.title("Homeopathic medicines")
+    st.markdown(f"Patient: **{patient.name}**")
+    if st.button("← Back to patient"):
+        reset_form()
+        go("patient", view=None, medicine_list=None)
+
+    st.subheader("1. Get recommendations")
+    st.caption("Based on Info.md and Extra_info.md.")
+    extra = st.text_area(
+        "Additional input for this request (optional)", key=f"medicine-extra-{nonce}", height=120,
+        placeholder="For example: current symptoms, modalities, or remedies already tried.",
+    )
+    if st.button("Generate recommendations", type="primary"):
+        with guarded("generating medicine recommendations") as outcome, st.status("Generating recommendations…", expanded=True) as status:
+            st.session_state.medicine_list = generate_and_save_medicines(extra, None, st.write)
+            status.update(label=f"Saved {MEDICINE.file_name(st.session_state.medicine_list[0])}", state="complete", expanded=False)
+
+    current = st.session_state.medicine_list
+    if current is None:
+        return
+    number, text = current
+    st.success(f"{MEDICINE.file_name(number)} saved to Drive.")
+    with st.container(border=True):
+        st.markdown(text)
+    st.download_button(f"Download {MEDICINE.file_name(number)}", text, file_name=MEDICINE.file_name(number),
+                       mime="text/markdown", on_click="ignore")
+
+    st.subheader("2. Your recommendations")
+    st.caption(f"Describe the changes you want. A new list is created from {MEDICINE.file_name(number)} and your input; "
+               "the list above is kept.")
+    doctor_input = st.text_area(
+        "Doctor's recommendations", key=f"medicine-doctor-{nonce}-{number}", height=160,
+        placeholder="For example: use Kali bichromicum 30C instead of Pulsatilla; add Belladonna 200C for acute fever.",
+    )
+    if st.button("Create revised list", type="primary"):
+        if not doctor_input.strip():
+            st.warning("Enter your recommendations first.")
+            return
+        with guarded("revising the medicine list") as outcome, st.status("Creating revised list…", expanded=True) as status:
+            revised = generate_and_save_medicines(doctor_input, current, st.write)
+            status.update(label=f"Saved {MEDICINE.file_name(revised[0])}", state="complete", expanded=False)
+        if outcome.ok:
+            st.session_state.medicine_list = revised
+            st.rerun()
 
 
 # ================================================================ main
@@ -640,6 +775,7 @@ SCREENS = {
     "patient": screen_patient,
     "new": screen_new,
     "update": screen_update,
+    "medicine": screen_medicine,
 }
 
 
