@@ -69,20 +69,19 @@ def generate_plan(
     patient_name: str,
     info_md: str | None,
     extra_info_md: str,
-    previous_plan: tuple[int, str] | None,
+    previous_plan: str | None,
     photos: list[Attachment] | None = None,
     kind: str = "nutrition",
 ) -> str:
     """Plan body in Markdown (no title). `kind` is "nutrition" or "exercise".
 
-    Uses Info.md when present, otherwise the photos. `previous_plan` is (version number, text).
+    Uses Info.md when present, otherwise the photos. `previous_plan` is the text of the current saved plan.
     """
     system = _system(*PLAN_PROMPTS[kind])
     parts = _case_parts(patient_name, info_md, extra_info_md, photos)
 
     if previous_plan:
-        number, text = previous_plan
-        parts.append(f"# Previous {kind} plan (version {number})\n\n{text.strip()}")
+        parts.append(f"# Previous {kind} plan\n\n{previous_plan.strip()}")
         parts.append(
             "Review this previous plan and produce an updated plan that accounts for the new information. "
             'Note explicitly what changed and why in the "Changes from Previous Plan" section.'

@@ -19,4 +19,4 @@ Only if indicated; otherwise write "None recommended."
 ## Follow-up Notes
 
 ## Changes from Previous Plan
-Only from Plan 2 onward: list what changed compared with the previous plan and why.
+Only when a previous plan is provided: list what changed compared with it and why.

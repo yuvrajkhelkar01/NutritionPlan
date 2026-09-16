@@ -1,6 +1,6 @@
 # NutritionPlan
 
-A personal Streamlit app for one doctor. You photograph handwritten patient notes, and the app stores them per patient in your Google Drive. An AI then transcribes the notes and drafts a nutrition plan and, on request, a basic exercise plan and homeopathic medicine recommendations. Each new plan builds on the previous one, and old plans are never overwritten.
+A personal Streamlit app for one doctor. You photograph handwritten patient notes, and the app stores them per patient in your Google Drive. An AI transcribes the notes when you add photos. It drafts a nutrition plan, a basic exercise plan or homeopathic medicine recommendations only when you ask. If nothing was added to the case study since the last result, the saved result is shown and the AI is not called.
 
 Every AI-generated plan is a draft. Review it before using it.
 
@@ -16,11 +16,9 @@ NutritionPlan/
     │   ├── Info.md          # AI transcription + structured summary
     │   └── Extra_info.md    # your typed remarks, one dated section per update
     ├── Nutrition_Plan/
-    │   ├── Plan1.md
-    │   └── Plan2.md …       # one new file per request, never overwritten
+    │   └── NutritionPlan.md # overwritten on each request (Drive keeps version history)
     ├── Exercise_Plan/
-    │   ├── ExercisePlan1.md
-    │   └── ExercisePlan2.md …
+    │   └── ExercisePlan.md  # overwritten on each request
     └── Homeopathic_Medicine/
         ├── MedicineList1.md
         └── MedicineList2.md …  # each generated or revised list is a new file
@@ -101,11 +99,12 @@ Anyone with the URL reaches the password screen, so use a strong `APP_PASSWORD`.
 ## Using the app
 
 - **Search**: finds patient folders by name, ignoring case. Partial matches appear as a pick-list.
-- **New case study**: when no patient matches, upload photos (or use the camera) and add observations. The app creates the folders, transcribes the photos into `Info.md`, writes `Extra_info.md` and generates `Plan1.md`.
-- **Update Case Study**: adds photos (or replaces them all, after you confirm) and appends dated observations. If the photos changed, `Info.md` is regenerated. Saving does not create a plan.
-- **Request Diet Plan**: sends `Info.md` (or the photos if `Info.md` is missing), `Extra_info.md` and the latest plan to the AI, and saves the result as the next `PlanN.md`.
-- **Request Exercise Plan**: same inputs, but with the latest exercise plan, and saves the next `Exercise_Plan/ExercisePlanN.md`. It is never generated automatically.
-- **Homeopathic Medicines**: opens a page with two steps. (1) **Generate recommendations** from `Info.md` and `Extra_info.md`, plus optional input for this request. (2) Type **your recommendations** and click **Create revised list**. The AI rewrites the list shown, applying your changes. Each list is a single table: Recommendation, Potency, Rate. Each list is saved as the next `MedicineListN.md` with your input quoted at the top, so earlier lists are kept. You can revise as many times as you like.
+- **New case study**: when no patient matches, upload photos (or use the camera) and add observations. The app creates the folders, transcribes the photos into `Info.md`, and writes `Extra_info.md`. No plan is generated.
+- **Update Case Study**: adds photos (or replaces them all, after you confirm) and appends dated observations. `Info.md` is regenerated only when photos were added or replaced; observations alone make no AI call. Saving does not create a plan.
+- **Request Diet Plan**: if `Info.md`, `Extra_info.md` or a photo changed since `NutritionPlan.md` was saved, the app reads them, sends them with the saved plan to the AI, and overwrites `NutritionPlan.md`. If nothing changed, the saved plan is shown without an AI call; use **Regenerate anyway** to force a new one.
+- **Request Exercise Plan**: the same, for `Exercise_Plan/ExercisePlan.md`.
+- Older numbered plans (`PlanN.md`, `ExercisePlanN.md`) from earlier app versions are left in Drive. The newest one is used until the first new plan is saved.
+- **Homeopathic Medicines**: opens a page with two steps. (1) **Generate recommendations** from `Info.md` and `Extra_info.md`, plus optional input for this request. If nothing was added since the last list and the input box is empty, the last list is shown without an AI call (**Generate new recommendations anyway** forces one). (2) Type **your recommendations** and click **Create revised list**. The AI rewrites the list shown, applying your changes. Each list is a single table: Recommendation, Potency, Rate. Each list is saved as the next `MedicineListN.md` with your input quoted at the top, so earlier lists are kept. You can revise as many times as you like.
 - **Download Case files / Open Patient Case Study**: download individual files or a ZIP, or read everything in the app.
 
 Replaced photos go to Drive **trash**, so they can be recovered for 30 days.

@@ -5,8 +5,8 @@ Drive layout (names must match exactly):
     NutritionPlan/<PatientName>/Documents/Photos/
     NutritionPlan/<PatientName>/Documents/Info.md
     NutritionPlan/<PatientName>/Documents/Extra_info.md
-    NutritionPlan/<PatientName>/Nutrition_Plan/Plan1.md, Plan2.md, ...
-    NutritionPlan/<PatientName>/Exercise_Plan/ExercisePlan1.md, ExercisePlan2.md, ...
+    NutritionPlan/<PatientName>/Nutrition_Plan/NutritionPlan.md   (overwritten on each request)
+    NutritionPlan/<PatientName>/Exercise_Plan/ExercisePlan.md     (overwritten on each request)
     NutritionPlan/<PatientName>/Homeopathic_Medicine/MedicineList1.md, MedicineList2.md, ...
 """
 from __future__ import annotations
@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import threading
 import webbrowser
 from dataclasses import dataclass
 from typing import Callable
@@ -42,8 +43,11 @@ EXERCISE_PLANS = "Exercise_Plan"
 MEDICINE = "Homeopathic_Medicine"
 INFO_FILE = "Info.md"
 EXTRA_INFO_FILE = "Extra_info.md"
-PLAN_PREFIX = "Plan"  # Nutrition_Plan/PlanN.md
-EXERCISE_PLAN_PREFIX = "ExercisePlan"  # Exercise_Plan/ExercisePlanN.md
+NUTRITION_PLAN_FILE = "NutritionPlan.md"
+EXERCISE_PLAN_FILE = "ExercisePlan.md"
+# Numbered plans written by earlier versions of the app (PlanN.md / ExercisePlanN.md); read only as a fallback.
+LEGACY_PLAN_PREFIX = "Plan"
+LEGACY_EXERCISE_PLAN_PREFIX = "ExercisePlan"
 MEDICINE_LIST_PREFIX = "MedicineList"  # Homeopathic_Medicine/MedicineListN.md
 
 RESUMABLE_THRESHOLD = 5 * 1024 * 1024
@@ -170,6 +174,7 @@ class DriveFile:
     id: str
     name: str
     mime_type: str
+    modified: str = ""  # RFC 3339 UTC modifiedTime from Drive; sorts chronologically as a string
 
     @property
     def is_folder(self) -> bool:
@@ -192,7 +197,7 @@ def _quote(value: str) -> str:
 
 
 def _from_api(item: dict) -> DriveFile:
-    return DriveFile(item["id"], item["name"], item["mimeType"])
+    return DriveFile(item["id"], item["name"], item["mimeType"], item.get("modifiedTime", ""))
 
 
 # ---------------------------------------------------------------- client
@@ -201,10 +206,14 @@ def _from_api(item: dict) -> DriveFile:
 class Drive:
     def __init__(self, creds: Credentials):
         self._svc = build("drive", "v3", credentials=creds, cache_discovery=False)
+        # httplib2 connections are not thread-safe, and Streamlit can run a new rerun of the script while an
+        # older one is still inside a Drive call. Concurrent use of one connection can crash the process.
+        self._lock = threading.Lock()
 
     def _execute(self, request, action: str):
         try:
-            return request.execute(num_retries=2)
+            with self._lock:
+                return request.execute(num_retries=2)
         except HttpError as e:
             raise DriveError(f"Google Drive error while {action}: {e.resp.status} {e.reason}") from e
         except RefreshError as e:
@@ -228,7 +237,7 @@ class Drive:
                 self._svc.files().list(
                     q=query,
                     spaces="drive",
-                    fields="nextPageToken, files(id, name, mimeType)",
+                    fields="nextPageToken, files(id, name, mimeType, modifiedTime)",
                     orderBy="name",
                     pageSize=1000,
                     pageToken=page_token,
@@ -248,7 +257,7 @@ class Drive:
             f"and trashed = false and mimeType {op} '{FOLDER_MIME}'"
         )
         resp = self._execute(
-            self._svc.files().list(q=query, spaces="drive", fields="files(id, name, mimeType)", pageSize=10),
+            self._svc.files().list(q=query, spaces="drive", fields="files(id, name, mimeType, modifiedTime)", pageSize=10),
             f"looking up '{name}'",
         )
         return next((_from_api(f) for f in resp.get("files", []) if f["name"] == name), None)
@@ -331,7 +340,7 @@ class Drive:
 
     # --- plans
 
-    def list_plans(self, plans_id: str, prefix: str = PLAN_PREFIX) -> list[tuple[int, DriveFile]]:
+    def list_plans(self, plans_id: str, prefix: str) -> list[tuple[int, DriveFile]]:
         """<prefix>N.md files (e.g. PlanN.md) as (N, file), oldest first."""
         name_re = re.compile(rf"^{re.escape(prefix)}(\d+)\.md$")
         plans = []
@@ -341,7 +350,7 @@ class Drive:
                 plans.append((int(match.group(1)), f))
         return sorted(plans, key=lambda p: p[0])
 
-    def save_new_plan(self, plans_id: str, number: int, text: str, prefix: str = PLAN_PREFIX) -> str:
+    def save_new_plan(self, plans_id: str, number: int, text: str, prefix: str) -> str:
         """Save <prefix>N.md. Refuses to overwrite: existing plans are never modified."""
         name = f"{prefix}{number}.md"
         if self.find_child(plans_id, name, folder=False):
